@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.gitignore
+.pytest_cache/
+tests/
+*.log
+fyersApi.log
+fyersRequests.log
+nifty50_orb_build_tasks.md
+position_calculator_plan.txt
+# Sensitive runtime files — injected via volumes at runtime, not baked into the image
+.env
+config/token.txt
+data/*.db

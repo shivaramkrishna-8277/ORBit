@@ -1,0 +1,17 @@
+services:
+  orbot:
+    build: .
+    container_name: orbot
+    restart: unless-stopped   # auto-restart on crash or host reboot; respects manual `docker stop`
+    env_file: .env
+    volumes:
+      - ./config:/app/config   # token.txt persists across restarts
+      - ./data:/app/data       # SQLite database persists
+      - ./logs:/app/logs       # log files persist
+    ports:
+      - "8080:8080"            # Fyers OAuth callback (used during morning token refresh only)
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"

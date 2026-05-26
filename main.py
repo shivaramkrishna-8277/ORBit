@@ -1,0 +1,137 @@
+"""ORB Bot — main entry point.
+
+Usage:
+    python main.py                  # Normal run
+    python main.py --dry-run        # Alerts printed to console, not sent to Telegram
+    python main.py --test-telegram  # Send a test Telegram message and exit
+"""
+import argparse
+import sys
+import time
+
+from src.utils.logger import get_logger
+
+logger = get_logger("main")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Nifty 50 ORB Alert Bot — tracks Opening Range Breakouts on Nifty 50 stocks."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Run the full pipeline but print alerts to console instead of sending Telegram messages.",
+    )
+    parser.add_argument(
+        "--test-telegram",
+        action="store_true",
+        help="Send a test Telegram message to verify credentials, then exit.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    session = None
+
+    try:
+        # 1. Validate all env vars at startup
+        import src.config as cfg
+
+        logger.info(
+            "ORB Bot starting — %d symbols, price ≤ ₹%.0f, ORB threshold %.1f%%",
+            len(cfg.NIFTY50_SYMBOLS), cfg.MAX_STOCK_PRICE, cfg.ORB_RANGE_THRESHOLD,
+        )
+
+        # 2. Initialise the database (idempotent — safe to run every startup)
+        from src.utils import db
+        db.init_db()
+
+        # 3. Handle --test-telegram flag
+        if args.test_telegram:
+            from src.alerts.telegram_notifier import TelegramNotifier
+            TelegramNotifier().send_test_message()
+            logger.info("Test message sent. Exiting.")
+            sys.exit(0)
+
+        # 4. Check market calendar
+        from src.utils.market_calendar import is_market_open, next_trading_day
+        if not is_market_open():
+            from datetime import datetime
+            import pytz
+            today = datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%Y-%m-%d")
+            next_day = next_trading_day()
+            logger.info("Market is closed today (%s). Next trading day: %s", today, next_day)
+            try:
+                from src.alerts.telegram_notifier import TelegramNotifier
+                TelegramNotifier(dry_run=args.dry_run).send_message(
+                    f"📅 Market closed today ({today}). Next trading day: {next_day}"
+                )
+            except Exception:
+                pass
+            sys.exit(0)
+
+        if args.dry_run:
+            logger.info("DRY RUN mode — Telegram alerts will print to console only.")
+
+        # 5. Start Telegram Application polling so the ConversationHandler can receive
+        #    button taps and typed replies for the position sizing calculator.
+        #    Runs in a daemon thread alongside the APScheduler-based session manager.
+        #    Skipped in dry-run mode (no real bot, no keyboard needed).
+        if not args.dry_run:
+            import threading
+            from telegram.ext import Application
+            from src.alerts.position_calculator import build_calculator_handler
+            _tg_app = Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).build()
+            _tg_app.add_handler(build_calculator_handler())
+            threading.Thread(
+                target=_tg_app.run_polling,
+                kwargs={"drop_pending_updates": True},
+                daemon=True,
+                name="telegram-polling",
+            ).start()
+            logger.info("Telegram polling thread started (calculator ready).")
+
+        # 6. Start the session manager (APScheduler keeps running until KeyboardInterrupt)
+        from src.session_manager import SessionManager
+        session = SessionManager(dry_run=args.dry_run)
+        session.start()
+
+        logger.info("Bot running. Press Ctrl+C to stop.")
+        while True:
+            time.sleep(1)
+
+    except ValueError as exc:
+        logger.error("Configuration error: %s", exc)
+        logger.error("Copy .env.example to .env and fill in all required values.")
+        _notify_startup_failure(str(exc), args)
+        sys.exit(1)
+
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user (Ctrl+C).")
+
+    except Exception as exc:
+        logger.exception("Unexpected startup error: %s", exc)
+        _notify_startup_failure(str(exc), args)
+        sys.exit(1)
+
+    finally:
+        if session:
+            session.stop()
+        logger.info("Bot shut down cleanly.")
+
+
+def _notify_startup_failure(error: str, args: argparse.Namespace) -> None:
+    """Best-effort Telegram alert on startup failure."""
+    try:
+        from src.alerts.telegram_notifier import TelegramNotifier
+        TelegramNotifier(dry_run=getattr(args, "dry_run", False)).send_message(
+            f"⚠️ ORB Bot failed to start:\n{error[:300]}"
+        )
+    except Exception:
+        pass  # Don't raise inside an error handler
+
+
+if __name__ == "__main__":
+    main()

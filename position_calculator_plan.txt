@@ -1,0 +1,388 @@
+can i build in a calculator into my telegram bot for position sizing. i.e as soon as i get an alert it should ask for capital then risk then stop loss amount and if give all the details it should instantly give me the position sizing details
+
+8:21 PM
+Yes, absolutely — this is actually the perfect way to do Phase 2. Instead of hardcoding capital and risk into the bot, you make it conversational inside Telegram itself. Here's exactly how it works:
+
+How it works technically
+Telegram bots support conversation flows via the ConversationHandler in python-telegram-bot. When a breakout alert fires, the bot sends the alert and immediately starts an interactive Q&A session right in the same chat.
+
+Bot:  🟢 BULLISH BREAKOUT — TATASTEEL
+      Close: ₹187.50 | ORB High: ₹186.20
+      Move: +0.70% above ORB
+      Time: 10:15 IST
+      
+      💰 Run position calculator? (Yes / Skip)
+
+You:  Yes
+
+Bot:  Enter your total capital (₹):
+
+You:  500000
+
+Bot:  Enter risk % per trade (e.g. 1):
+
+You:  1
+
+Bot:  Enter your stop loss price (₹):
+
+You:  184.00
+
+Bot:  ━━━━━━━━━━━━━━━━━━━━
+      📊 POSITION SIZING
+      ━━━━━━━━━━━━━━━━━━━━
+      Entry:        ₹187.50
+      Stop Loss:    ₹184.00
+      Risk/Share:   ₹3.50
+      
+      Capital:      ₹5,00,000
+      Risk (1%):    ₹5,000
+      
+      Quantity:     142 shares
+      Total Cost:   ₹26,625
+      Max Loss:     ₹497 (capped to 1%)
+      
+      Target (1:2): ₹194.50
+      Target (1:3): ₹198.00
+      ━━━━━━━━━━━━━━━━━━━━
+      ⚠️ Manual trade — no order placed
+Key design decisions
+Inline keyboard buttons for Yes/Skip — instead of typing, you tap a button. Much faster when you're looking at a live signal and need to act in seconds.
+
+Pre-filled entry price — the bot already knows the breakout candle close price, so it skips that question entirely. You only answer 3 things: capital, risk %, stop loss.
+
+Remember last capital and risk % — after the first use, the bot stores your last used capital and risk % in SQLite. Next alert it asks "Use same settings? ₹5L @ 1% risk — Yes / Change". Most days you won't change these, so it becomes a single tap.
+
+Timeout — if you don't respond within 60 seconds, the calculator quietly closes. You don't want a half-open conversation blocking the next alert.
+
+Does this belong in Phase 1 or Phase 2?
+You can actually build this at the end of Phase 1 since it's purely a Telegram UI feature — no order placement, no broker API needed. It's self-contained inside the Telegram conversation handler. The position sizing math is simple arithmetic.
+
+The only Phase 2 addition would be auto-pulling the capital figure from your broker account balance via API, so you don't have to type it at all.
+
+Want me to add this as a new set of tasks with Copilot prompts to the markdown file, or create a separate focused task file just for the calculator feature?
+
+i have completed phase 1 can you give me step by step guide to setup the position sizing calculator. it should ask capital, margin, risk percentage(on capital not on capital + margin), risk per share that's it. It should give results like quantity, total cost, max loss
+
+8:34 PM
+Great progress on Phase 1! Before I build the exact guide, let me clarify two things so the calculator is precise:
+
+Waiting for your answers — once I know these two things I'll give you the exact step-by-step guide with code.
+
+Q: When you say margin — how do you want it used in the calculation?
+A: Total buying power = capital + margin (quantity based on this)
+
+Q: What should trigger the calculator flow?
+A: Automatically after every breakout alert (bot asks if you want to calculate)
+
+8:35 PM
+Perfect. Here's the complete step-by-step implementation guide.
+
+How the flow will work
+Bot:  🟢 BULLISH BREAKOUT — TATASTEEL
+      Close: ₹187.50 | ORB High: ₹186.20
+      Time: 10:15 IST
+
+      [📊 Calculate Position] [Skip]
+
+You:  tap → Calculate Position
+
+Bot:  Enter your capital (₹):
+You:  500000
+
+Bot:  Enter your margin (₹):
+You:  250000
+
+Bot:  Enter risk % on capital (e.g. 1):
+You:  1
+
+Bot:  Enter risk per share (₹):
+You:  3.50
+
+Bot:  ━━━━━━━━━━━━━━━━━━━━
+      📊 POSITION SIZING — TATASTEEL
+      ━━━━━━━━━━━━━━━━━━━━
+      Capital:        ₹5,00,000
+      Margin:         ₹2,50,000
+      Buying Power:   ₹7,50,000
+
+      Risk on Capital:  1% = ₹5,000
+      Risk per Share:   ₹3.50
+
+      Quantity:       1,428 shares
+      Total Cost:     ₹2,67,750
+      Max Loss:       ₹4,998
+      ━━━━━━━━━━━━━━━━━━━━
+Step 1 — Install / verify dependency
+You already have python-telegram-bot from Phase 1. Make sure it's v20+:
+
+bash
+pip show python-telegram-bot
+If below v20:
+
+bash
+pip install python-telegram-bot==20.7
+v20 is required because it uses ConversationHandler with async/await, which is what the flow below uses.
+
+Step 2 — Create the calculator module
+Create a new file src/alerts/position_calculator.py and paste this entire block:
+
+python
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ConversationHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
+import math
+import logging
+
+logger = logging.getLogger(__name__)
+
+# Conversation states — each is just a unique integer
+CAPITAL, MARGIN, RISK_PCT, RISK_PER_SHARE = range(4)
+
+# Key used to pass signal data into the conversation
+SIGNAL_KEY = "current_signal"
+
+
+async def prompt_calculator(context, chat_id: int, signal: dict):
+    """
+    Called by your breakout alert function right after sending the alert.
+    Sends the Yes/Skip inline keyboard.
+    """
+    context.bot_data[SIGNAL_KEY] = signal  # store signal for use inside conversation
+
+    keyboard = [
+        [
+            InlineKeyboardButton("📊 Calculate Position", callback_data="calc_yes"),
+            InlineKeyboardButton("Skip", callback_data="calc_skip"),
+        ]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="Run position sizing calculator?",
+        reply_markup=markup,
+    )
+
+
+async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the Yes/Skip button tap."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "calc_skip":
+        await query.edit_message_text("Calculator skipped.")
+        return ConversationHandler.END
+
+    await query.edit_message_text("Enter your *capital* (₹):", parse_mode="Markdown")
+    return CAPITAL
+
+
+async def get_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        capital = float(update.message.text.replace(",", "").strip())
+        if capital <= 0:
+            raise ValueError
+        context.user_data["capital"] = capital
+        await update.message.reply_text("Enter your *margin* (₹):", parse_mode="Markdown")
+        return MARGIN
+    except ValueError:
+        await update.message.reply_text("❌ Invalid amount. Enter a positive number (e.g. 500000):")
+        return CAPITAL
+
+
+async def get_margin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        margin = float(update.message.text.replace(",", "").strip())
+        if margin < 0:
+            raise ValueError
+        context.user_data["margin"] = margin
+        await update.message.reply_text(
+            "Enter *risk %* on capital (e.g. `1` for 1%):", parse_mode="Markdown"
+        )
+        return RISK_PCT
+    except ValueError:
+        await update.message.reply_text("❌ Invalid amount. Enter 0 or a positive number:")
+        return MARGIN
+
+
+async def get_risk_pct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        risk_pct = float(update.message.text.replace("%", "").strip())
+        if not (0 < risk_pct <= 100):
+            raise ValueError
+        context.user_data["risk_pct"] = risk_pct
+        await update.message.reply_text(
+            "Enter *risk per share* (₹) — your SL distance per share:",
+            parse_mode="Markdown",
+        )
+        return RISK_PER_SHARE
+    except ValueError:
+        await update.message.reply_text("❌ Enter a valid % between 0 and 100 (e.g. 1 or 0.5):")
+        return RISK_PCT
+
+
+async def get_risk_per_share(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        risk_per_share = float(update.message.text.replace(",", "").strip())
+        if risk_per_share <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ Enter a positive number (e.g. 3.50):")
+        return RISK_PER_SHARE
+
+    # Pull stored values
+    capital        = context.user_data["capital"]
+    margin         = context.user_data["margin"]
+    risk_pct       = context.user_data["risk_pct"]
+    signal         = context.bot_data.get(SIGNAL_KEY, {})
+    symbol         = signal.get("symbol", "UNKNOWN")
+    entry_price    = signal.get("candle_close", 0)
+
+    # Core calculation
+    buying_power   = capital + margin
+    risk_amount    = capital * (risk_pct / 100)          # risk on capital only
+    quantity       = math.floor(risk_amount / risk_per_share)
+    total_cost     = quantity * entry_price if entry_price else quantity * risk_per_share
+    max_loss       = quantity * risk_per_share
+
+    # Format output
+    def fmt(n):
+        return f"₹{n:,.2f}"
+
+    result = (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 *POSITION SIZING — {symbol}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Capital:          {fmt(capital)}\n"
+        f"Margin:           {fmt(margin)}\n"
+        f"Buying Power:     {fmt(buying_power)}\n\n"
+        f"Risk on Capital:  {risk_pct}% = {fmt(risk_amount)}\n"
+        f"Risk per Share:   {fmt(risk_per_share)}\n\n"
+        f"Quantity:         {quantity:,} shares\n"
+    )
+
+    if entry_price:
+        result += f"Total Cost:       {fmt(total_cost)}\n"
+
+    result += (
+        f"Max Loss:         {fmt(max_loss)}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ Manual trade — no order placed"
+    )
+
+    await update.message.reply_text(result, parse_mode="Markdown")
+
+    # Clean up user_data for next trade
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User typed /cancel mid-flow."""
+    context.user_data.clear()
+    await update.message.reply_text("Calculator cancelled.")
+    return ConversationHandler.END
+
+
+def build_calculator_handler() -> ConversationHandler:
+    """
+    Call this in your main bot setup to register the conversation handler.
+    """
+    return ConversationHandler(
+        entry_points=[CallbackQueryHandler(calc_start, pattern="^calc_")],
+        states={
+            CAPITAL:        [MessageHandler(filters.TEXT & ~filters.COMMAND, get_capital)],
+            MARGIN:         [MessageHandler(filters.TEXT & ~filters.COMMAND, get_margin)],
+            RISK_PCT:       [MessageHandler(filters.TEXT & ~filters.COMMAND, get_risk_pct)],
+            RISK_PER_SHARE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_risk_per_share)],
+        },
+        fallbacks=[MessageHandler(filters.COMMAND, cancel)],
+        conversation_timeout=120,  # auto-cancel if no response in 2 minutes
+    )
+Step 3 — Update your Telegram notifier
+Open your existing src/alerts/telegram_notifier.py and make two changes:
+
+Change 1 — update send_breakout_alert to call prompt_calculator after sending the alert:
+
+python
+# At the top, add this import
+from src.alerts.position_calculator import prompt_calculator
+
+# Inside send_breakout_alert, after sending the alert message, add:
+async def send_breakout_alert(self, signal: dict, context):
+    # ... your existing alert message code ...
+
+    # After sending alert, immediately prompt calculator
+    await prompt_calculator(context, self.chat_id, signal)
+Change 2 — pass context into send_breakout_alert wherever you call it. In your breakout_detector.py or session_manager.py, the call will look like:
+
+python
+await notifier.send_breakout_alert(signal, context)
+Step 4 — Register the handler in your bot setup
+Open your main.py (or wherever you build the Application object) and add the conversation handler:
+
+python
+from src.alerts.position_calculator import build_calculator_handler
+
+# Where you build your Application:
+app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+# Add the calculator conversation handler
+app.add_handler(build_calculator_handler())
+
+# Your existing handlers stay as-is below this
+The order matters — add_handler with the ConversationHandler must come before any generic MessageHandler you have, otherwise button taps may get swallowed.
+
+Step 5 — Test it end to end
+Run this quick standalone test before touching your live bot — paste it in a temp file and run it directly:
+
+python
+# test_calc_standalone.py
+# Manually simulate what happens when a breakout fires
+import asyncio
+from telegram import Bot
+from telegram.ext import Application
+from src.alerts.position_calculator import prompt_calculator, build_calculator_handler
+from src.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+async def test():
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(build_calculator_handler())
+
+    fake_signal = {
+        "symbol": "TATASTEEL",
+        "signal_type": "BULLISH",
+        "candle_close": 187.50,
+        "orb_level": 186.20,
+    }
+
+    async with app:
+        await app.start()
+        await prompt_calculator(app, TELEGRAM_CHAT_ID, fake_signal)
+        await app.updater.start_polling()
+        await asyncio.sleep(180)  # keep alive for 3 mins to complete the flow
+        await app.updater.stop()
+        await app.stop()
+
+asyncio.run(test())
+Run it, go to Telegram, tap "Calculate Position", answer all 4 questions, and verify the result looks correct.
+
+Step 6 — Validate the math manually
+Before using it in a real trade, verify with a known example:
+
+Input	Value
+Capital	₹5,00,000
+Margin	₹2,50,000
+Risk %	1%
+Risk per share	₹3.50
+Expected output:
+
+Buying Power = ₹7,50,000
+Risk Amount = ₹5,000 (1% of capital only, not buying power)
+Quantity = floor(5000 / 3.50) = 1,428 shares
+Max Loss = 1428 × 3.50 = ₹4,998
+If your bot returns exactly this, the calculator is working correctly.
