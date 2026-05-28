@@ -80,14 +80,28 @@ def main() -> None:
         #    Runs in a daemon thread alongside the APScheduler-based session manager.
         #    Skipped in dry-run mode (no real bot, no keyboard needed).
         if not args.dry_run:
+            import asyncio
             import threading
             from telegram.ext import Application
             from src.alerts.position_calculator import build_calculator_handler
             _tg_app = Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).build()
             _tg_app.add_handler(build_calculator_handler())
+
+            def _run_polling(app):
+                """Run Telegram polling in its own event loop without installing
+                signal handlers (avoids set_wakeup_fd error in non-main thread)."""
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                async def _inner():
+                    async with app:
+                        await app.start()
+                        await app.updater.start_polling(drop_pending_updates=True)
+                        await asyncio.Event().wait()  # block until daemon thread is killed
+                loop.run_until_complete(_inner())
+
             threading.Thread(
-                target=_tg_app.run_polling,
-                kwargs={"drop_pending_updates": True},
+                target=_run_polling,
+                args=(_tg_app,),
                 daemon=True,
                 name="telegram-polling",
             ).start()
