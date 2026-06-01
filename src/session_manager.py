@@ -81,7 +81,8 @@ class SessionManager:
         """Auth + build watchlist + Telegram session-start message."""
         logger.info("09:10 job: authenticating…")
         try:
-            self._access_token = auth.get_access_token()
+            send_fn = self._notifier.send_message if not self._dry_run else None
+            self._access_token = auth.get_access_token(send_fn=send_fn)
             client = fyers_client.get_client(self._access_token)
             manager = WatchlistManager(client)
             self._watchlist = manager.build_daily_watchlist()

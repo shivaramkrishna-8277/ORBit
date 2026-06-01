@@ -112,10 +112,14 @@ def generate_access_token() -> str:
     return token
 
 
-def get_access_token() -> str:
+def get_access_token(send_fn: Optional[Callable[[str], None]] = None) -> str:
     """
     Return a valid access token.
-    Uses today's cached token if available; otherwise runs the OAuth flow.
+    Uses today's cached token if available; otherwise triggers the VPS-friendly
+    OAuth redirect flow (send_fn delivers the login URL via Telegram).
+
+    Args:
+        send_fn: Callable to send a Telegram message.  If None, the URL is logged.
 
     Returns:
         access_token (str) in the format  "<app_id>:<token>"
@@ -123,8 +127,8 @@ def get_access_token() -> str:
     cached = _load_token_if_valid()
     if cached:
         return cached
-    logger.info("No valid cached token found — starting auth flow.")
-    return generate_access_token()
+    logger.info("No valid cached token found — starting OAuth redirect flow.")
+    return generate_access_token_via_redirect(send_fn=send_fn)
 
 
 def is_token_valid() -> bool:

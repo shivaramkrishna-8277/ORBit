@@ -25,7 +25,8 @@ class TelegramNotifier:
         self._token = config.TELEGRAM_BOT_TOKEN
         self._chat_id = config.TELEGRAM_CHAT_ID
         self._dry_run = dry_run
-        self._bot = Bot(token=self._token) if not dry_run else None
+        # No persistent Bot instance — a fresh one is created per asyncio.run() call
+        # to avoid RuntimeError('Event loop is closed') when called from APScheduler threads.
 
     # ── Core send ─────────────────────────────────────────────────────────────
 
@@ -35,7 +36,10 @@ class TelegramNotifier:
             print(f"[TELEGRAM DRY-RUN]\n{text}\n{'─' * 50}")
             return
         try:
-            asyncio.run(self._bot.send_message(chat_id=self._chat_id, text=text))
+            async def _send():
+                async with Bot(token=self._token) as bot:
+                    await bot.send_message(chat_id=self._chat_id, text=text)
+            asyncio.run(_send())
         except TelegramError as exc:
             logger.error("Telegram send failed: %s", exc)
         except Exception as exc:
@@ -73,9 +77,12 @@ class TelegramNotifier:
         self.send_message(msg)
 
         # Prompt position calculator (live mode only)
-        if not self._dry_run and self._bot:
+        if not self._dry_run:
             try:
-                asyncio.run(prompt_calculator(self._bot, self._chat_id, signal))
+                async def _prompt():
+                    async with Bot(token=self._token) as bot:
+                        await prompt_calculator(bot, self._chat_id, signal)
+                asyncio.run(_prompt())
             except Exception as exc:
                 logger.error("Calculator prompt failed: %s", exc)
 
