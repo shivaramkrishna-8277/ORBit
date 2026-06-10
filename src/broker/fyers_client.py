@@ -13,6 +13,7 @@ import pytz
 
 from fyers_apiv3.fyersModel import FyersModel
 from src import config
+from src.utils.quote_price import quote_filter_price
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -141,15 +142,32 @@ def get_historical_candles(
 def get_nifty50_prices(client: FyersModel) -> dict[str, dict]:
     """
     Fetch live prices for all Nifty 50 symbols and return only those
-    with LTP strictly below MAX_STOCK_PRICE.
+    with price strictly below MAX_STOCK_PRICE.
+
+    Uses LTP when available; otherwise previous close (typical before 9:15).
 
     Returns:
-        {symbol: {"ltp", "open", "high", "low", "close"}}
+        {symbol: {"ltp", "open", "high", "low", "close", "filter_price"}}
     """
     all_quotes = get_quotes(client, config.NIFTY50_SYMBOLS)
-    filtered = {sym: data for sym, data in all_quotes.items() if data["ltp"] < config.MAX_STOCK_PRICE}
+    filtered: dict[str, dict] = {}
+    no_price = 0
+    above_limit = 0
+
+    for sym, data in all_quotes.items():
+        price = quote_filter_price(data)
+        if price is None:
+            no_price += 1
+            logger.warning("%s — no LTP or previous close; excluded from watchlist", sym)
+            continue
+        if price >= config.MAX_STOCK_PRICE:
+            above_limit += 1
+            continue
+        filtered[sym] = {**data, "filter_price": price}
+
     logger.info(
-        "Price filter: %d of %d Nifty 50 stocks have LTP < ₹%.0f",
-        len(filtered), len(all_quotes), config.MAX_STOCK_PRICE,
+        "Price filter: %d of %d Nifty 50 stocks under ₹%.0f "
+        "(%d above limit, %d missing price data)",
+        len(filtered), len(all_quotes), config.MAX_STOCK_PRICE, above_limit, no_price,
     )
     return filtered

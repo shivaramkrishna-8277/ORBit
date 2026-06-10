@@ -93,6 +93,19 @@ class SessionManager:
 
     def _job_09_15(self) -> None:
         """Start WebSocket tick stream."""
+        if not self._watchlist:
+            logger.warning("Watchlist empty at 09:15 — attempting rebuild with live prices…")
+            try:
+                if not self._access_token:
+                    send_fn = self._notifier.send_message if not self._dry_run else None
+                    self._access_token = auth.get_access_token(send_fn=send_fn)
+                client = fyers_client.get_client(self._access_token)
+                self._watchlist = WatchlistManager(client).build_daily_watchlist()
+                if self._watchlist:
+                    logger.info("09:15 watchlist rebuild complete: %d symbols.", len(self._watchlist))
+            except Exception:
+                logger.exception("09:15 watchlist rebuild failed.")
+
         logger.info("09:15 job: starting WebSocket stream for %d symbols.", len(self._watchlist))
         if not self._watchlist:
             logger.warning("Watchlist is empty — WebSocket not started.")

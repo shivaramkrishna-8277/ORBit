@@ -30,6 +30,15 @@ class ORBCalculator:
         today = datetime.now(IST).strftime("%Y-%m-%d")
         orb_high = first_candle["high"]
         orb_low = first_candle["low"]
+        open_price = first_candle.get("open", 0.0)
+
+        if open_price >= config.MAX_STOCK_PRICE:
+            db.insert_orb_level(today, symbol, orb_high, orb_low, 0.0, passed=0)
+            logger.info(
+                "%s DROPPED — open ₹%.2f exceeds ₹%.0f price limit",
+                symbol, open_price, config.MAX_STOCK_PRICE,
+            )
+            return None
 
         if orb_low == 0:
             logger.warning("%s — ORB low is zero, skipping.", symbol)

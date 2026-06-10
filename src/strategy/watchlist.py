@@ -3,6 +3,7 @@ from datetime import datetime
 
 import pytz
 
+from src import config
 from src.broker import fyers_client
 from src.utils import db
 from src.utils.logger import get_logger
@@ -30,12 +31,13 @@ class WatchlistManager:
 
         symbols: list[str] = []
         for sym, data in prices.items():
-            db.insert_watchlist(today, sym, data["ltp"])
+            price = data.get("filter_price", data["ltp"])
+            db.insert_watchlist(today, sym, price)
             symbols.append(sym)
 
         logger.info(
             "%d of 50 Nifty stocks under ₹%.0f today (%s)",
-            len(symbols), __import__("src.config", fromlist=["MAX_STOCK_PRICE"]).MAX_STOCK_PRICE, today,
+            len(symbols), config.MAX_STOCK_PRICE, today,
         )
         return sorted(symbols)
 
