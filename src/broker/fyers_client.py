@@ -13,7 +13,7 @@ import pytz
 
 from fyers_apiv3.fyersModel import FyersModel
 from src import config
-from src.utils.quote_price import quote_filter_price
+from src.utils.quote_price import normalize_fyers_quote, quote_filter_price
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -83,13 +83,7 @@ def get_quotes(client: FyersModel, symbols: list[str]) -> dict[str, dict]:
             continue
         sym = item["n"]
         v = item["v"]
-        result[sym] = {
-            "ltp":   v.get("ltp", 0.0),
-            "open":  v.get("open", 0.0),
-            "high":  v.get("high", 0.0),
-            "low":   v.get("low", 0.0),
-            "close": v.get("close", 0.0),
-        }
+        result[sym] = normalize_fyers_quote(v)
 
     return result
 
@@ -158,7 +152,7 @@ def get_nifty50_prices(client: FyersModel) -> dict[str, dict]:
         price = quote_filter_price(data)
         if price is None:
             no_price += 1
-            logger.warning("%s — no LTP or previous close; excluded from watchlist", sym)
+            logger.debug("%s — no LTP or previous close; excluded from watchlist", sym)
             continue
         if price >= config.MAX_STOCK_PRICE:
             above_limit += 1

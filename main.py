@@ -4,6 +4,7 @@ Usage:
     python main.py                  # Normal run
     python main.py --dry-run        # Alerts printed to console, not sent to Telegram
     python main.py --test-telegram  # Send a test Telegram message and exit
+    python main.py --test-watchlist # Fetch quotes and print price-filter results, then exit
 """
 import argparse
 import sys
@@ -27,6 +28,11 @@ def parse_args() -> argparse.Namespace:
         "--test-telegram",
         action="store_true",
         help="Send a test Telegram message to verify credentials, then exit.",
+    )
+    parser.add_argument(
+        "--test-watchlist",
+        action="store_true",
+        help="Fetch live Fyers quotes and print the ₹800 price filter results, then exit.",
     )
     return parser.parse_args()
 
@@ -54,6 +60,10 @@ def main() -> None:
             TelegramNotifier().send_test_message()
             logger.info("Test message sent. Exiting.")
             sys.exit(0)
+
+        if args.test_watchlist:
+            from src.cli.test_watchlist import run_test_watchlist
+            sys.exit(run_test_watchlist())
 
         # 4. Check market calendar
         from src.utils.market_calendar import is_market_open, next_trading_day
