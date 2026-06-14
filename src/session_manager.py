@@ -3,7 +3,7 @@
 Scheduled jobs (all times IST, Mon–Fri, non-holiday only):
   09:10  — auth + build watchlist + session-start Telegram message
   09:15  — start WebSocket tick stream
-  09:30  — flush first candles, run ORB filter, send ORB summary
+  09:30  — lock first 15-min candle (9:15–9:30), run ORB filter, send summary
   09:45–15:15 (every 15 min) — flush candles, run breakout checks
   15:15  — stop WebSocket, send session-end summary, reset state
 
@@ -120,11 +120,14 @@ class SessionManager:
             logger.exception("09:15 job failed (WebSocket start).")
 
     def _job_09_30(self) -> None:
-        """Lock ORB levels and activate breakout detection."""
-        logger.info("09:30 job: locking ORB levels.")
+        """Lock the 9:15–9:30 first candle and run the ORB range filter."""
+        logger.info("09:30 job: locking first 15-min ORB levels.")
         try:
+            if not self._access_token:
+                self._access_token = auth.get_access_token()
+            client = fyers_client.get_client(self._access_token)
             self._orb_levels = self._orb_calc.process_all_symbols(
-                self._candle_builder, self._watchlist
+                self._candle_builder, self._watchlist, client=client
             )
             self._breakout = BreakoutDetector(
                 orb_levels=self._orb_levels,
@@ -171,13 +174,15 @@ class SessionManager:
 
     def _schedule_jobs(self) -> None:
         # Weekday-only cron trigger helper
-        def cron(hour: int, minute: int):
-            return CronTrigger(day_of_week="mon-fri", hour=hour, minute=minute, timezone=IST)
+        def cron(hour: int, minute: int, second: int = 0):
+            return CronTrigger(
+                day_of_week="mon-fri", hour=hour, minute=minute, second=second, timezone=IST
+            )
 
-        self._scheduler.add_job(self._job_08_45,    cron(8, 45),  id="job_08_45",   replace_existing=True)
-        self._scheduler.add_job(self._job_09_10,    cron(9, 10),  id="job_09_10",   replace_existing=True)
-        self._scheduler.add_job(self._job_09_15,    cron(9, 15),  id="job_09_15",   replace_existing=True)
-        self._scheduler.add_job(self._job_09_30,    cron(9, 30),  id="job_09_30",   replace_existing=True)
+        self._scheduler.add_job(self._job_08_45,    cron(8, 45),      id="job_08_45",   replace_existing=True)
+        self._scheduler.add_job(self._job_09_10,    cron(9, 10),      id="job_09_10",   replace_existing=True)
+        self._scheduler.add_job(self._job_09_15,    cron(9, 15),      id="job_09_15",   replace_existing=True)
+        self._scheduler.add_job(self._job_09_30,    cron(9, 30, 5),   id="job_09_30",   replace_existing=True)
         self._scheduler.add_job(self._job_15_15,    cron(15, 15), id="job_15_15",   replace_existing=True)
 
         # Candle flush every 15 min from 09:45 to 15:15

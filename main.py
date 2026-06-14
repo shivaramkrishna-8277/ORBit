@@ -5,6 +5,7 @@ Usage:
     python main.py --dry-run        # Alerts printed to console, not sent to Telegram
     python main.py --test-telegram  # Send a test Telegram message and exit
     python main.py --test-watchlist # Fetch quotes and print price-filter results, then exit
+    python main.py --test-orb       # Fetch today's 9:15 ORB candle and print range, then exit
 """
 import argparse
 import sys
@@ -33,6 +34,12 @@ def parse_args() -> argparse.Namespace:
         "--test-watchlist",
         action="store_true",
         help="Fetch live Fyers quotes and print the ₹800 price filter results, then exit.",
+    )
+    parser.add_argument(
+        "--test-orb",
+        nargs="*",
+        metavar="SYMBOL",
+        help="Fetch today's exchange 9:15 ORB candle (default: HDFCBANK). Optional Fyers symbols.",
     )
     return parser.parse_args()
 
@@ -64,6 +71,11 @@ def main() -> None:
         if args.test_watchlist:
             from src.cli.test_watchlist import run_test_watchlist
             sys.exit(run_test_watchlist())
+
+        if args.test_orb is not None:
+            from src.cli.test_orb import run_test_orb
+            symbols = args.test_orb if args.test_orb else None
+            sys.exit(run_test_orb(symbols))
 
         # 4. Check market calendar
         from src.utils.market_calendar import is_market_open, next_trading_day

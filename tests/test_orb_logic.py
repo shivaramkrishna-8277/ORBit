@@ -74,6 +74,26 @@ class TestCandleBuilder:
         assert new_candle["open"] == 520.0
 
     @patch("src.strategy.candle_builder.db")
+    def test_pre_market_ticks_ignored(self, mock_db):
+        from src.strategy.candle_builder import CandleBuilder
+        cb = CandleBuilder()
+        cb.on_tick("NSE:SBIN-EQ", 500.0, ist(9, 10, 0))
+        assert cb.get_current_candle("NSE:SBIN-EQ") is None
+
+    @patch("src.strategy.candle_builder.db")
+    def test_finalize_opening_range_locks_first_candle(self, mock_db):
+        from src.strategy.candle_builder import CandleBuilder
+        cb = CandleBuilder()
+        symbol = "NSE:SBIN-EQ"
+        cb.on_tick(symbol, 500.0, ist(9, 15, 0))
+        cb.on_tick(symbol, 510.0, ist(9, 25, 0))
+        cb.finalize_opening_range()
+        first = cb.get_first_candle(symbol)
+        assert first is not None
+        assert first["high"] == 510.0
+        assert first["low"] == 500.0
+
+    @patch("src.strategy.candle_builder.db")
     def test_on_candle_close_called_exactly_once_per_bucket(self, mock_db):
         from src.strategy.candle_builder import CandleBuilder
         on_close = MagicMock()

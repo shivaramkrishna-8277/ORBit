@@ -133,6 +133,42 @@ def get_historical_candles(
     return df.reset_index(drop=True)
 
 
+def get_opening_range_candle(
+    client: FyersModel,
+    symbol: str,
+    date_str: str | None = None,
+) -> dict | None:
+    """
+    Fetch the official exchange 9:15–9:30 IST opening-range candle.
+
+    Uses Fyers history API (same OHLC as charts), not the tick-built candle.
+    """
+    if date_str is None:
+        date_str = datetime.now(IST).strftime("%Y-%m-%d")
+
+    df = get_historical_candles(client, symbol, "15", date_str, date_str)
+    if df.empty:
+        return None
+
+    orb_start = IST.localize(datetime.strptime(f"{date_str} 09:15", "%Y-%m-%d %H:%M"))
+    for _, row in df.iterrows():
+        ts = row["datetime"]
+        if ts.tzinfo is None:
+            ts = IST.localize(ts)
+        else:
+            ts = ts.astimezone(IST)
+        if ts.replace(second=0, microsecond=0) == orb_start:
+            return {
+                "candle_start": orb_start,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]),
+            }
+    return None
+
+
 def get_nifty50_prices(client: FyersModel) -> dict[str, dict]:
     """
     Fetch live prices for all Nifty 50 symbols and return only those

@@ -2,13 +2,14 @@
 
 Buckets are aligned to market open: 9:15, 9:30, 9:45, 10:00 … 15:15 IST.
 """
-from datetime import datetime, time as dtime
+from datetime import datetime
 from typing import Callable
 
 import pytz
 
 from src.utils import db
 from src.utils.logger import get_logger
+from src.utils.market_sessions import is_opening_range_candle, market_open_dt
 
 logger = get_logger(__name__)
 
@@ -56,7 +57,7 @@ def _bucket_start(ts: datetime) -> datetime:
         hour=_MARKET_OPEN_HOUR, minute=_MARKET_OPEN_MINUTE, second=0, microsecond=0
     )
     if ts < market_open:
-        return market_open
+        return market_open  # unused when pre-market ticks are ignored in on_tick
 
     elapsed_seconds = int((ts - market_open).total_seconds())
     bucket_seconds = (elapsed_seconds // (_CANDLE_MINUTES * 60)) * (_CANDLE_MINUTES * 60)
@@ -81,7 +82,16 @@ class CandleBuilder:
 
     def on_tick(self, symbol: str, price: float, timestamp: datetime) -> None:
         """Process a single tick and update the current in-progress candle."""
-        bucket = _bucket_start(timestamp)
+        if timestamp.tzinfo is None:
+            ts = IST.localize(timestamp)
+        else:
+            ts = timestamp.astimezone(IST)
+
+        # Only build candles from 9:15 AM onward (first bucket = 9:15–9:30)
+        if ts < market_open_dt(ts):
+            return
+
+        bucket = _bucket_start(ts)
 
         if symbol not in self._candles:
             # First tick ever for this symbol
@@ -123,17 +133,30 @@ class CandleBuilder:
             volume=candle["volume"],
         )
 
-        # Cache the 9:15 first candle (ORB window)
-        orb_start_time = dtime(_MARKET_OPEN_HOUR, _MARKET_OPEN_MINUTE)
-        if candle["candle_start"].time() == orb_start_time and symbol not in self._first_candles:
+        # Cache the 9:15–9:30 first 15-minute candle (ORB window)
+        if is_opening_range_candle(candle["candle_start"]) and symbol not in self._first_candles:
             self._first_candles[symbol] = dict(candle)
-            logger.debug("First candle locked for %s: H=%.2f L=%.2f", symbol, candle["high"], candle["low"])
+            logger.debug(
+                "First 15-min candle (9:15–9:30) locked for %s: H=%.2f L=%.2f",
+                symbol, candle["high"], candle["low"],
+            )
 
         if self._on_candle_close:
             try:
                 self._on_candle_close(symbol, dict(candle))
             except Exception:
                 logger.exception("on_candle_close callback error for %s", symbol)
+
+    def finalize_opening_range(self) -> None:
+        """
+        Close the in-progress 9:15–9:30 first candle at the 9:30 boundary.
+
+        Called once after the opening range ends; does not touch later candles.
+        """
+        for symbol, candle in list(self._candles.items()):
+            if is_opening_range_candle(candle["candle_start"]):
+                self._finalise(symbol, candle)
+                del self._candles[symbol]
 
     def flush_all(self) -> None:
         """
