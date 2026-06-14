@@ -24,6 +24,7 @@ from src.strategy.orb_calculator import ORBCalculator
 from src.strategy.watchlist import WatchlistManager
 from src.utils import db
 from src.utils.logger import get_logger
+from src.utils.market_calendar import is_market_open
 
 logger = get_logger(__name__)
 
@@ -60,6 +61,14 @@ class SessionManager:
 
     # ── Scheduled jobs ─────────────────────────────────────────────────────────
 
+    def _trading_day_only(self, job_fn):
+        """Skip scheduled jobs on weekends and NSE holidays."""
+        def wrapped():
+            if not is_market_open():
+                return
+            job_fn()
+        return wrapped
+
     def _job_08_45(self) -> None:
         """At 8:45 AM check token validity; trigger OAuth refresh if expired."""
         from src.broker.auth import is_token_valid, generate_access_token_via_redirect
@@ -72,6 +81,8 @@ class SessionManager:
         send_fn = self._notifier.send_message if not self._dry_run else None
         try:
             generate_access_token_via_redirect(send_fn=send_fn)
+            if not self._dry_run:
+                self._notifier.prompt_daily_capital()
         except TimeoutError:
             logger.error("08:45 token refresh timed out.")
         except Exception:
@@ -83,6 +94,8 @@ class SessionManager:
         try:
             send_fn = self._notifier.send_message if not self._dry_run else None
             self._access_token = auth.get_access_token(send_fn=send_fn)
+            if not self._dry_run:
+                self._notifier.prompt_daily_capital()
             client = fyers_client.get_client(self._access_token)
             manager = WatchlistManager(client)
             self._watchlist = manager.build_daily_watchlist()
@@ -179,21 +192,21 @@ class SessionManager:
                 day_of_week="mon-fri", hour=hour, minute=minute, second=second, timezone=IST
             )
 
-        self._scheduler.add_job(self._job_08_45,    cron(8, 45),      id="job_08_45",   replace_existing=True)
-        self._scheduler.add_job(self._job_09_10,    cron(9, 10),      id="job_09_10",   replace_existing=True)
-        self._scheduler.add_job(self._job_09_15,    cron(9, 15),      id="job_09_15",   replace_existing=True)
-        self._scheduler.add_job(self._job_09_30,    cron(9, 30, 5),   id="job_09_30",   replace_existing=True)
-        self._scheduler.add_job(self._job_15_15,    cron(15, 15), id="job_15_15",   replace_existing=True)
+        self._scheduler.add_job(self._trading_day_only(self._job_08_45), cron(8, 45),      id="job_08_45",   replace_existing=True)
+        self._scheduler.add_job(self._trading_day_only(self._job_09_10), cron(9, 10),      id="job_09_10",   replace_existing=True)
+        self._scheduler.add_job(self._trading_day_only(self._job_09_15), cron(9, 15),      id="job_09_15",   replace_existing=True)
+        self._scheduler.add_job(self._trading_day_only(self._job_09_30), cron(9, 30, 5),   id="job_09_30",   replace_existing=True)
+        self._scheduler.add_job(self._trading_day_only(self._job_15_15), cron(15, 15), id="job_15_15",   replace_existing=True)
 
         # Candle flush every 15 min from 09:45 to 15:15
         for minute_offset in range(45, 60, 15):  # 9:45
-            self._scheduler.add_job(self._job_candle_tick, cron(9, minute_offset),
+            self._scheduler.add_job(self._trading_day_only(self._job_candle_tick), cron(9, minute_offset),
                                     id=f"flush_09_{minute_offset:02d}", replace_existing=True)
         for hour in range(10, 16):
             for minute in range(0, 60, 15):
                 if hour == 15 and minute > 15:
                     break
-                self._scheduler.add_job(self._job_candle_tick, cron(hour, minute),
+                self._scheduler.add_job(self._trading_day_only(self._job_candle_tick), cron(hour, minute),
                                         id=f"flush_{hour:02d}_{minute:02d}", replace_existing=True)
 
     def start(self) -> None:

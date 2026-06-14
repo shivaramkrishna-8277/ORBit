@@ -77,22 +77,17 @@ def main() -> None:
             symbols = args.test_orb if args.test_orb else None
             sys.exit(run_test_orb(symbols))
 
-        # 4. Check market calendar
+        # 4. Keep running on non-trading days (Docker restart loop fix — no exit, no spam)
         from src.utils.market_calendar import is_market_open, next_trading_day
         if not is_market_open():
             from datetime import datetime
             import pytz
             today = datetime.now(pytz.timezone("Asia/Kolkata")).strftime("%Y-%m-%d")
             next_day = next_trading_day()
-            logger.info("Market is closed today (%s). Next trading day: %s", today, next_day)
-            try:
-                from src.alerts.telegram_notifier import TelegramNotifier
-                TelegramNotifier(dry_run=args.dry_run).send_message(
-                    f"📅 Market closed today ({today}). Next trading day: {next_day}"
-                )
-            except Exception:
-                pass
-            sys.exit(0)
+            logger.info(
+                "Market closed today (%s). Bot staying idle until next session (%s).",
+                today, next_day,
+            )
 
         if args.dry_run:
             logger.info("DRY RUN mode — Telegram alerts will print to console only.")
@@ -105,9 +100,10 @@ def main() -> None:
             import asyncio
             import threading
             from telegram.ext import Application
-            from src.alerts.position_calculator import build_calculator_handler
+            from src.alerts.position_calculator import build_position_handlers
             _tg_app = Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).build()
-            _tg_app.add_handler(build_calculator_handler())
+            for handler in build_position_handlers():
+                _tg_app.add_handler(handler)
 
             def _run_polling(app):
                 """Run Telegram polling in its own event loop without installing

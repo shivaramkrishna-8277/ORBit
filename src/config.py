@@ -39,6 +39,8 @@ TELEGRAM_CHAT_ID: str = _require("TELEGRAM_CHAT_ID")
 # ── Strategy parameters ───────────────────────────────────────────────────────
 MAX_STOCK_PRICE: float = float(os.getenv("MAX_STOCK_PRICE", "800"))
 ORB_RANGE_THRESHOLD: float = float(os.getenv("ORB_RANGE_THRESHOLD", "0.6"))
+MARGIN_MULTIPLIER: float = float(os.getenv("MARGIN_MULTIPLIER", "5"))
+DEFAULT_RISK_PCT: float = float(os.getenv("DEFAULT_RISK_PCT", "1.0"))
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()

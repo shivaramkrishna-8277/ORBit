@@ -1,7 +1,7 @@
 """Telegram notification module — sends ORB alerts and session summaries."""
 import asyncio
 from datetime import datetime
-from src.alerts.position_calculator import prompt_calculator
+from src.alerts.position_calculator import prompt_trade_setup
 
 import pytz
 from telegram import Bot
@@ -76,15 +76,15 @@ class TelegramNotifier:
 
         self.send_message(msg)
 
-        # Prompt position calculator (live mode only)
+        # Ask entry + stop loss for position sizing (live mode only)
         if not self._dry_run:
             try:
                 async def _prompt():
                     async with Bot(token=self._token) as bot:
-                        await prompt_calculator(bot, self._chat_id, signal)
+                        await prompt_trade_setup(bot, self._chat_id, signal)
                 asyncio.run(_prompt())
             except Exception as exc:
-                logger.error("Calculator prompt failed: %s", exc)
+                logger.error("Trade sizing prompt failed: %s", exc)
 
         # Mark as alerted in the database
         if signal.get("id"):
@@ -127,3 +127,18 @@ class TelegramNotifier:
         now = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
         self.send_message(f"✅ ORB Bot — test message OK\n{now}")
         logger.info("Test Telegram message sent.")
+
+    def prompt_daily_capital(self) -> None:
+        """Ask user for today's capital (once per trading day)."""
+        if self._dry_run:
+            return
+        try:
+            from src.alerts.position_calculator import prompt_daily_capital
+
+            async def _prompt():
+                async with Bot(token=self._token) as bot:
+                    await prompt_daily_capital(bot, int(self._chat_id))
+
+            asyncio.run(_prompt())
+        except Exception as exc:
+            logger.error("Daily capital prompt failed: %s", exc)

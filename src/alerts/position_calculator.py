@@ -1,44 +1,36 @@
-"""Position sizing calculator — Telegram ConversationHandler."""
+"""Position sizing — daily capital setup + entry/SL per breakout signal."""
 from __future__ import annotations
 
 import logging
-import math
-import warnings
+from datetime import datetime
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import pytz
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    ConversationHandler,
     CallbackQueryHandler,
+    ContextTypes,
     MessageHandler,
     filters,
-    ContextTypes,
 )
 
-try:
-    from telegram.warnings import PTBUserWarning as _PTBUserWarning
-except ImportError:
-    _PTBUserWarning = UserWarning  # type: ignore[misc,assignment]
+from src import config
+from src.utils import db
+from src.utils.position_sizing import compute_position, margin_from_capital
 
 logger = logging.getLogger(__name__)
 
-# ── Conversation states ──────────────────────────────────────────────
-CAPITAL, MARGIN, RISK_PCT, RISK_PER_SHARE = range(4)
+IST = pytz.timezone("Asia/Kolkata")
 
-# ── Module-level state ───────────────────────────────────────────────
-_pending_signals: dict[int, dict] = {}   # chat_id → current signal
-_last_values:     dict[int, dict] = {}   # chat_id → last used settings (persists in-process)
+_CAP_PRESETS = [100_000, 200_000, 500_000, 1_000_000]
 
-# ── Quick-pick presets ───────────────────────────────────────────────
-_CAP_PRESETS = [100_000, 200_000, 500_000, 1_000_000]   # ₹1L  ₹2L  ₹5L  ₹10L
-_MRG_PRESETS = [0, 50_000, 100_000, 250_000, 500_000]   # ₹0  ₹50K  ₹1L  ₹2.5L  ₹5L
-_RSK_PRESETS = [0.5, 1.0, 1.5, 2.0]                     # 0.5%  1%  1.5%  2%
-_RPS_PRESETS = [2.0, 5.0, 10.0, 25.0]                   # fallback when no entry price
+# chat_id → {step, signal?, entry?, ...}
+_trade_state: dict[int, dict] = {}
+_daily_capital_pending: set[int] = set()
 
 
-# ── Formatting helpers ───────────────────────────────────────────────
+# ── Formatting ───────────────────────────────────────────────────────
 
 def _fmt_inr(n: float) -> str:
-    """Short Indian notation for button labels: ₹5L, ₹50K, ₹0."""
     if n == 0:
         return "₹0"
     if n >= 100_000:
@@ -50,405 +42,261 @@ def _fmt_inr(n: float) -> str:
     return f"₹{n:g}"
 
 
-# ── Keyboard builders ────────────────────────────────────────────────
-
-def _last_row(key: str, label_fn, prefix: str, chat_id: int) -> list[InlineKeyboardButton]:
-    """Return a one-button row showing the last used value, or empty list."""
-    val = _last_values.get(chat_id, {}).get(key)
-    if val is not None:
-        return [InlineKeyboardButton(f"↩ Last: {label_fn(val)}", callback_data=f"{prefix}{val}")]
-    return []
+def _fmt_full(n: float) -> str:
+    return f"₹{n:,.2f}"
 
 
-def _capital_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(_fmt_inr(v), callback_data=f"cap_{v}") for v in _CAP_PRESETS]]
-    last = _last_row("capital", _fmt_inr, "cap_", chat_id)
-    if last:
-        rows.append(last)
-    return InlineKeyboardMarkup(rows)
+def _short_symbol(symbol: str) -> str:
+    return symbol.replace("NSE:", "").replace("-EQ", "")
 
 
-def _margin_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(_fmt_inr(v), callback_data=f"mrg_{v}") for v in _MRG_PRESETS[:3]],
-        [InlineKeyboardButton(_fmt_inr(v), callback_data=f"mrg_{v}") for v in _MRG_PRESETS[3:]],
-    ]
-    last = _last_row("margin", _fmt_inr, "mrg_", chat_id)
-    if last:
-        rows.append(last)
-    return InlineKeyboardMarkup(rows)
+def _today() -> str:
+    return datetime.now(IST).strftime("%Y-%m-%d")
 
 
-def _risk_pct_keyboard(chat_id: int) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(f"{v}%", callback_data=f"rsk_{v}") for v in _RSK_PRESETS]]
-    last = _last_row("risk_pct", lambda v: f"{v}%", "rsk_", chat_id)
-    if last:
-        rows.append(last)
-    return InlineKeyboardMarkup(rows)
+def _margin_from_capital(capital: float) -> tuple[float, float]:
+    return margin_from_capital(capital)
 
 
-def _rps_keyboard(chat_id: int, entry_price: float = 0.0) -> InlineKeyboardMarkup:
-    """
-    When entry_price is known, show 0.5/1/1.5/2% of entry translated to ₹.
-    Otherwise fall back to fixed presets.
-    """
-    if entry_price:
-        btns = [
-            InlineKeyboardButton(
-                f"{pct}%=₹{round(entry_price * pct / 100, 2):g}",
-                callback_data=f"rps_{round(entry_price * pct / 100, 2)}",
-            )
-            for pct in [0.5, 1.0, 1.5, 2.0]
-        ]
-        rows = [btns[:2], btns[2:]]
-    else:
-        rows = [
-            [InlineKeyboardButton(f"₹{v:g}", callback_data=f"rps_{v}") for v in _RPS_PRESETS[:2]],
-            [InlineKeyboardButton(f"₹{v:g}", callback_data=f"rps_{v}") for v in _RPS_PRESETS[2:]],
-        ]
-    last = _last_row("risk_per_share", lambda v: f"₹{v:g}", "rps_", chat_id)
-    if last:
-        rows.append(last)
-    return InlineKeyboardMarkup(rows)
+def _compute_position(
+    capital: float,
+    entry: float,
+    stop_loss: float,
+    risk_pct: float | None = None,
+) -> dict:
+    return compute_position(capital, entry, stop_loss, risk_pct)
 
 
-# ── Prompt senders ───────────────────────────────────────────────────
-
-async def _ask(
-    context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
-    text: str,
-    kbd: InlineKeyboardMarkup,
-) -> None:
-    """Send a prompt with an inline keyboard and store message_id for later cleanup."""
-    msg = await context.bot.send_message(
-        chat_id=chat_id, text=text, parse_mode="Markdown", reply_markup=kbd
-    )
-    context.user_data["_kbd_msg"] = msg.message_id
-
-
-async def _dismiss_keyboard(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    """Remove the inline keyboard from the last prompt (when user typed instead of tapping)."""
-    msg_id = context.user_data.pop("_kbd_msg", None)
-    if msg_id:
-        try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=chat_id, message_id=msg_id, reply_markup=None
-            )
-        except Exception:
-            pass  # already gone or already modified — ignore
-
-
-async def _send_capital_q(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    await _ask(context, chat_id, "1/4 · *Capital* (₹) — tap or type:", _capital_keyboard(chat_id))
-
-
-async def _send_margin_q(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    await _ask(context, chat_id, "2/4 · *Margin* (₹) — tap or type:", _margin_keyboard(chat_id))
-
-
-async def _send_risk_pct_q(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    await _ask(context, chat_id, "3/4 · *Risk %* on capital — tap or type:", _risk_pct_keyboard(chat_id))
-
-
-async def _send_rps_q(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    entry     = context.user_data.get("_entry_price", 0.0)
-    direction = context.user_data.get("_direction", "")
-    note = ""
-    if entry:
-        emoji = {"BULLISH": "🟢", "BEARISH": "🔴"}.get(direction, "")
-        note = f"\n_{emoji} Entry: ₹{entry:,.2f}_"
-    await _ask(
-        context, chat_id,
-        f"4/4 · *Risk per Share* (₹ SL distance){note}\n_Tap a % of entry or type custom:_",
-        _rps_keyboard(chat_id, entry),
-    )
-
-
-# ── Core calculation ─────────────────────────────────────────────────
-
-async def _compute_and_send(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
-    capital        = context.user_data["capital"]
-    margin         = context.user_data["margin"]
-    risk_pct       = context.user_data["risk_pct"]
-    risk_per_share = context.user_data["risk_per_share"]
-
-    signal      = _pending_signals.pop(chat_id, {})
-    symbol      = signal.get("symbol", "").replace("NSE:", "").replace("-EQ", "") or "—"
-    entry_price = signal.get("candle_close", 0.0)
-    direction   = signal.get("signal_type", "")
-
-    buying_power = capital + margin
-    risk_amount  = capital * (risk_pct / 100)
-    quantity     = math.floor(risk_amount / risk_per_share)
-    total_cost   = quantity * entry_price if entry_price else 0.0
-    max_loss     = quantity * risk_per_share
-
-    d_emoji = {"BULLISH": "🟢", "BEARISH": "🔴"}.get(direction, "")
-
-    def fmt(n: float) -> str:
-        return f"₹{n:,.2f}"
-
-    header = f"{d_emoji} *{symbol}*"
-    if entry_price:
-        header += f" @ {fmt(entry_price)}"
-
+def _format_result(symbol: str, direction: str, entry: float, stop_loss: float, pos: dict) -> str:
+    emoji = {"BULLISH": "🟢", "BEARISH": "🔴"}.get(direction, "")
     lines = [
         "━━━━━━━━━━━━━━━━━━━━",
         "📊 *POSITION SIZING*",
-        header,
+        f"{emoji} *{_short_symbol(symbol)}*",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"Capital:          {fmt(capital)}",
-        f"Margin:           {fmt(margin)}",
-        f"Buying Power:     {fmt(buying_power)}",
+        f"Entry:            {_fmt_full(entry)}",
+        f"Stop Loss:        {_fmt_full(stop_loss)}",
+        f"Risk / Share:     {_fmt_full(pos['risk_per_share'])}",
         "",
-        f"Risk on Capital:  {risk_pct}% → {fmt(risk_amount)}",
-        f"Risk per Share:   {fmt(risk_per_share)}",
+        f"Capital:          {_fmt_full(pos['capital'])}",
+        f"Margin ({config.MARGIN_MULTIPLIER:.0f}×):     {_fmt_full(pos['margin'])}",
+        f"Buying Power:     {_fmt_full(pos['buying_power'])}",
         "",
-        f"*Quantity:        {quantity:,} shares*",
-    ]
-    if total_cost:
-        lines.append(f"Total Cost:       {fmt(total_cost)}")
-    lines += [
-        f"Max Loss:         {fmt(max_loss)}",
+        f"Risk on Capital:  {pos['risk_pct']}% → {_fmt_full(pos['risk_amount'])}",
+        f"*Quantity:        {pos['quantity']:,} shares*",
+        f"Total Cost:       {_fmt_full(pos['total_cost'])}",
+        f"Max Loss:         {_fmt_full(pos['max_loss'])}",
         "━━━━━━━━━━━━━━━━━━━━",
         "⚠️ Manual trade — no order placed",
     ]
-
-    # Persist values for next signal
-    _last_values[chat_id] = {
-        "capital":        capital,
-        "margin":         margin,
-        "risk_pct":       risk_pct,
-        "risk_per_share": risk_per_share,
-    }
-
-    await context.bot.send_message(
-        chat_id=chat_id, text="\n".join(lines), parse_mode="Markdown"
-    )
-    context.user_data.clear()
+    return "\n".join(lines)
 
 
-# ── Entry point (called externally by the notifier) ──────────────────
+# ── Daily capital (once per day) ─────────────────────────────────────
 
-async def prompt_calculator(bot, chat_id: int, signal: dict) -> None:
-    """
-    Called by telegram_notifier right after the breakout alert.
-    If the user has previous settings, surfaces a one-tap "Repeat last" button.
-    """
-    _pending_signals[chat_id] = signal
-    last = _last_values.get(chat_id)
+async def prompt_daily_capital(bot, chat_id: int) -> None:
+    """Ask for today's capital after token refresh / session start."""
+    if db.get_daily_capital(_today()) is not None:
+        return
 
-    rows: list[list[InlineKeyboardButton]] = []
-    if last:
-        label = (
-            f"♻️ Repeat  {_fmt_inr(last['capital'])} · "
-            f"M:{_fmt_inr(last['margin'])} · "
-            f"{last['risk_pct']}% · ₹{last['risk_per_share']:g}/sh"
-        )
-        rows.append([InlineKeyboardButton(label, callback_data="calc_last")])
-
-    rows.append([
-        InlineKeyboardButton("📊 Calculate", callback_data="calc_yes"),
-        InlineKeyboardButton("⏭ Skip",       callback_data="calc_skip"),
-    ])
-
+    _daily_capital_pending.add(chat_id)
+    rows = [
+        [InlineKeyboardButton(_fmt_inr(v), callback_data=f"dcap_{v}") for v in _CAP_PRESETS]
+    ]
     await bot.send_message(
         chat_id=chat_id,
-        text="Run position sizing calculator?",
+        text=(
+            "💰 *Daily setup* — enter total capital available today.\n"
+            f"_Margin auto-applied: {config.MARGIN_MULTIPLIER:.0f}× buying power "
+            f"({config.MARGIN_MULTIPLIER - 1:.0f}× margin on capital)._"
+        ),
+        parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
-# ── Conversation entry ────────────────────────────────────────────────
-
-async def calc_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query   = update.callback_query
-    await query.answer()
-    chat_id = update.effective_chat.id
-
-    if query.data == "calc_skip":
-        await query.edit_message_text("Calculator skipped.")
-        return ConversationHandler.END
-
-    # Store signal context so all prompt builders can reference entry price / direction
-    signal = _pending_signals.get(chat_id, {})
-    context.user_data["_entry_price"] = signal.get("candle_close", 0.0)
-    context.user_data["_direction"]   = signal.get("signal_type", "")
-
-    if query.data == "calc_last":
-        last = _last_values.get(chat_id)
-        if last:
-            context.user_data.update(last)
-            await query.edit_message_text("♻️ Using last settings…")
-            await _compute_and_send(context, chat_id)
-            return ConversationHandler.END
-
-    # Fresh calculation
-    await query.edit_message_text("📊 Position Sizing Calculator")
-    await _send_capital_q(context, chat_id)
-    return CAPITAL
+async def _save_daily_capital(context: ContextTypes.DEFAULT_TYPE, chat_id: int, capital: float) -> None:
+    _daily_capital_pending.discard(chat_id)
+    margin, buying_power = _margin_from_capital(capital)
+    db.save_daily_capital(_today(), capital, margin, buying_power, config.DEFAULT_RISK_PCT)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "✅ *Daily capital set*\n"
+            f"Capital:      {_fmt_full(capital)}\n"
+            f"Margin:       {_fmt_full(margin)} ({config.MARGIN_MULTIPLIER:.0f}×)\n"
+            f"Buying Power: {_fmt_full(buying_power)}\n"
+            f"Risk / trade: {config.DEFAULT_RISK_PCT}% of capital"
+        ),
+        parse_mode="Markdown",
+    )
 
 
-# ── State: CAPITAL ────────────────────────────────────────────────────
-
-async def _btn_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _on_daily_capital_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    value = float(query.data[4:])   # strip "cap_"
-    context.user_data["capital"] = value
-    await query.edit_message_text(f"1/4 · Capital: *{_fmt_inr(value)}* ✓", parse_mode="Markdown")
-    await _send_margin_q(context, update.effective_chat.id)
-    return MARGIN
-
-
-async def get_capital(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    await _dismiss_keyboard(context, chat_id)
+    if chat_id not in _daily_capital_pending:
+        return
+    capital = float(query.data[5:])
+    await query.edit_message_text(f"Capital: *{_fmt_inr(capital)}* ✓", parse_mode="Markdown")
+    await _save_daily_capital(context, chat_id, capital)
+
+
+async def _on_daily_capital_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
     try:
         capital = float(update.message.text.replace(",", "").strip())
         if capital <= 0:
             raise ValueError
-        context.user_data["capital"] = capital
-        await _send_margin_q(context, chat_id)
-        return MARGIN
     except ValueError:
-        msg = await update.message.reply_text(
-            "❌ Invalid. Enter a positive number (e.g. 500000):",
-            reply_markup=_capital_keyboard(chat_id),
+        await update.message.reply_text("❌ Enter a positive number (e.g. 500000):")
+        return
+
+    await _save_daily_capital(context, chat_id, capital)
+
+
+# ── Per-breakout entry + stop loss ────────────────────────────────────
+
+async def prompt_trade_setup(bot, chat_id: int, signal: dict) -> None:
+    """After a breakout alert, ask entry then stop loss."""
+    settings = db.get_daily_capital(_today())
+    if settings is None:
+        _daily_capital_pending.add(chat_id)
+        await bot.send_message(
+            chat_id=chat_id,
+            text="⚠️ Set today's capital first before sizing trades.",
         )
-        context.user_data["_kbd_msg"] = msg.message_id
-        return CAPITAL
+        await prompt_daily_capital(bot, chat_id)
+        return
+
+    sym = _short_symbol(signal.get("symbol", ""))
+    close = float(signal.get("candle_close", 0))
+    _trade_state[chat_id] = {"step": "entry", "signal": signal}
+
+    rows = []
+    if close > 0:
+        rows.append([InlineKeyboardButton(f"Use close {_fmt_full(close)}", callback_data="tentry_close")])
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"📐 *{sym}* — 1/2 · *Entry price*\n"
+            f"_Breakout close: {_fmt_full(close)}_ — tap or type:"
+        ),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+    )
 
 
-# ── State: MARGIN ─────────────────────────────────────────────────────
+async def _ask_stop_loss(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    state = _trade_state.get(chat_id, {})
+    signal = state.get("signal", {})
+    sym = _short_symbol(signal.get("symbol", ""))
+    entry = state.get("entry", 0)
+    direction = signal.get("signal_type", "")
+    hint = "below entry" if direction == "BULLISH" else "above entry"
 
-async def _btn_margin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"📐 *{sym}* — 2/2 · *Stop loss*\n"
+            f"Entry: {_fmt_full(entry)} — enter SL ({hint}):"
+        ),
+        parse_mode="Markdown",
+    )
+
+
+async def _finish_trade(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    state = _trade_state.pop(chat_id, {})
+    signal = state.get("signal", {})
+    entry = state.get("entry")
+    stop_loss = state.get("stop_loss")
+    settings = db.get_daily_capital(_today())
+
+    if not settings or entry is None or stop_loss is None:
+        return
+
+    try:
+        pos = _compute_position(
+            settings["capital"], entry, stop_loss, settings.get("risk_pct")
+        )
+    except ValueError as exc:
+        await context.bot.send_message(chat_id=chat_id, text=f"❌ {exc}")
+        return
+
+    text = _format_result(
+        signal.get("symbol", ""),
+        signal.get("signal_type", ""),
+        entry,
+        stop_loss,
+        pos,
+    )
+    await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+
+
+async def _on_trade_entry_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    value = float(query.data[4:])   # strip "mrg_"
-    context.user_data["margin"] = value
-    await query.edit_message_text(f"2/4 · Margin: *{_fmt_inr(value)}* ✓", parse_mode="Markdown")
-    await _send_risk_pct_q(context, update.effective_chat.id)
-    return RISK_PCT
-
-
-async def get_margin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    await _dismiss_keyboard(context, chat_id)
-    try:
-        margin = float(update.message.text.replace(",", "").strip())
-        if margin < 0:
-            raise ValueError
-        context.user_data["margin"] = margin
-        await _send_risk_pct_q(context, chat_id)
-        return RISK_PCT
-    except ValueError:
-        msg = await update.message.reply_text(
-            "❌ Invalid. Enter 0 or a positive number:",
-            reply_markup=_margin_keyboard(chat_id),
-        )
-        context.user_data["_kbd_msg"] = msg.message_id
-        return MARGIN
+    state = _trade_state.get(chat_id)
+    if not state or state.get("step") != "entry":
+        return
+
+    close = float(state["signal"].get("candle_close", 0))
+    state["entry"] = close
+    state["step"] = "stop_loss"
+    await query.edit_message_text(f"Entry: *{_fmt_full(close)}* ✓", parse_mode="Markdown")
+    await _ask_stop_loss(context, chat_id)
 
 
-# ── State: RISK_PCT ───────────────────────────────────────────────────
-
-async def _btn_risk_pct(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    value = float(query.data[4:])   # strip "rsk_"
-    context.user_data["risk_pct"] = value
-    await query.edit_message_text(f"3/4 · Risk: *{value}%* ✓", parse_mode="Markdown")
-    await _send_rps_q(context, update.effective_chat.id)
-    return RISK_PER_SHARE
-
-
-async def get_risk_pct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _on_trade_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    await _dismiss_keyboard(context, chat_id)
+    state = _trade_state.get(chat_id)
+    if not state:
+        return
+
     try:
-        risk_pct = float(update.message.text.replace("%", "").strip())
-        if not (0 < risk_pct <= 100):
+        value = float(update.message.text.replace(",", "").strip())
+        if value <= 0:
             raise ValueError
-        context.user_data["risk_pct"] = risk_pct
-        await _send_rps_q(context, chat_id)
-        return RISK_PER_SHARE
     except ValueError:
-        msg = await update.message.reply_text(
-            "❌ Enter a % between 0–100 (e.g. 1 or 0.5):",
-            reply_markup=_risk_pct_keyboard(chat_id),
-        )
-        context.user_data["_kbd_msg"] = msg.message_id
-        return RISK_PCT
+        await update.message.reply_text("❌ Enter a valid price (e.g. 741.50):")
+        return
+
+    step = state.get("step")
+    if step == "entry":
+        state["entry"] = value
+        state["step"] = "stop_loss"
+        await _ask_stop_loss(context, chat_id)
+    elif step == "stop_loss":
+        entry = state.get("entry", 0)
+        direction = state.get("signal", {}).get("signal_type", "")
+        if direction == "BULLISH" and value >= entry:
+            await update.message.reply_text("❌ Stop loss must be *below* entry for longs.", parse_mode="Markdown")
+            return
+        if direction == "BEARISH" and value <= entry:
+            await update.message.reply_text("❌ Stop loss must be *above* entry for shorts.", parse_mode="Markdown")
+            return
+        state["stop_loss"] = value
+        await _finish_trade(context, chat_id)
 
 
-# ── State: RISK_PER_SHARE ─────────────────────────────────────────────
+# ── Handler registration ──────────────────────────────────────────────
 
-async def _btn_rps(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    value = float(query.data[4:])   # strip "rps_"
-    context.user_data["risk_per_share"] = value
-    await query.edit_message_text(f"4/4 · Risk/Share: *₹{value:g}* ✓", parse_mode="Markdown")
-    await _compute_and_send(context, update.effective_chat.id)
-    return ConversationHandler.END
-
-
-async def get_risk_per_share(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def _on_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    await _dismiss_keyboard(context, chat_id)
-    try:
-        risk_per_share = float(update.message.text.replace(",", "").strip())
-        if risk_per_share <= 0:
-            raise ValueError
-        context.user_data["risk_per_share"] = risk_per_share
-        await _compute_and_send(context, chat_id)
-        return ConversationHandler.END
-    except ValueError:
-        msg = await update.message.reply_text(
-            "❌ Enter a positive number (e.g. 3.50):",
-            reply_markup=_rps_keyboard(chat_id, context.user_data.get("_entry_price", 0.0)),
-        )
-        context.user_data["_kbd_msg"] = msg.message_id
-        return RISK_PER_SHARE
+    if chat_id in _daily_capital_pending:
+        await _on_daily_capital_text(update, context)
+        return
+    if chat_id in _trade_state:
+        await _on_trade_text(update, context)
 
 
-# ── Cancel ────────────────────────────────────────────────────────────
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User typed /cancel mid-flow."""
-    _pending_signals.pop(update.effective_chat.id, None)
-    context.user_data.clear()
-    await update.message.reply_text("Calculator cancelled.")
-    return ConversationHandler.END
-
-
-# ── Registration ──────────────────────────────────────────────────────
-
-def build_calculator_handler() -> ConversationHandler:
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=_PTBUserWarning)
-        return ConversationHandler(
-            entry_points=[CallbackQueryHandler(calc_start, pattern="^calc_")],
-            states={
-                CAPITAL: [
-                    CallbackQueryHandler(_btn_capital,  pattern=r"^cap_"),
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, get_capital),
-                ],
-                MARGIN: [
-                    CallbackQueryHandler(_btn_margin,   pattern=r"^mrg_"),
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, get_margin),
-                ],
-                RISK_PCT: [
-                    CallbackQueryHandler(_btn_risk_pct, pattern=r"^rsk_"),
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, get_risk_pct),
-                ],
-                RISK_PER_SHARE: [
-                    CallbackQueryHandler(_btn_rps,      pattern=r"^rps_"),
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, get_risk_per_share),
-                ],
-            },
-            fallbacks=[MessageHandler(filters.COMMAND, cancel)],
-            conversation_timeout=120,
-        )
+def build_position_handlers() -> list:
+    """Return Telegram handlers for daily capital + per-trade sizing."""
+    return [
+        CallbackQueryHandler(_on_daily_capital_button, pattern=r"^dcap_"),
+        CallbackQueryHandler(_on_trade_entry_button, pattern=r"^tentry_close$"),
+        MessageHandler(filters.TEXT & ~filters.COMMAND, _on_text_input),
+    ]

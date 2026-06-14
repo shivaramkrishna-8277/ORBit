@@ -84,6 +84,15 @@ _DDL = [
         volume      REAL    NOT NULL DEFAULT 0
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS daily_trading_capital (
+        date          TEXT PRIMARY KEY,
+        capital       REAL NOT NULL,
+        margin        REAL NOT NULL,
+        buying_power  REAL NOT NULL,
+        risk_pct      REAL NOT NULL
+    )
+    """,
 ]
 
 
@@ -204,3 +213,37 @@ def insert_candle(
                VALUES (?,?,?,?,?,?,?,?)""",
             (date, symbol, candle_time, open_, high, low, close, volume),
         )
+
+
+# ── daily_trading_capital ─────────────────────────────────────────────────────
+
+def save_daily_capital(
+    date: str,
+    capital: float,
+    margin: float,
+    buying_power: float,
+    risk_pct: float,
+) -> None:
+    with _conn() as con:
+        con.execute(
+            """INSERT OR REPLACE INTO daily_trading_capital
+               (date, capital, margin, buying_power, risk_pct)
+               VALUES (?,?,?,?,?)""",
+            (date, capital, margin, buying_power, risk_pct),
+        )
+
+
+def get_daily_capital(date: str) -> dict | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT capital, margin, buying_power, risk_pct FROM daily_trading_capital WHERE date=?",
+            (date,),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "capital": row["capital"],
+        "margin": row["margin"],
+        "buying_power": row["buying_power"],
+        "risk_pct": row["risk_pct"],
+    }
