@@ -1,11 +1,12 @@
 """Telegram notification module — sends ORB alerts and session summaries."""
 import asyncio
+import time
 from datetime import datetime
-from src.alerts.position_calculator import prompt_trade_setup
 
 import pytz
 from telegram import Bot
-from telegram.error import TelegramError
+from telegram.error import NetworkError, TelegramError
+from telegram.request import HTTPXRequest
 
 from src import config
 from src.utils import db
@@ -15,44 +16,56 @@ logger = get_logger(__name__)
 
 IST = pytz.timezone("Asia/Kolkata")
 
+_TELEGRAM_RETRIES = 3
+_TELEGRAM_RETRY_DELAY = 2  # seconds
+
+
+def _build_bot() -> Bot:
+    """Bot with generous timeouts for VPS networks."""
+    request = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+        pool_timeout=30.0,
+    )
+    return Bot(token=config.TELEGRAM_BOT_TOKEN, request=request)
+
 
 class TelegramNotifier:
     def __init__(self, dry_run: bool = False):
-        """
-        Args:
-            dry_run: If True, print messages to console instead of sending to Telegram.
-        """
         self._token = config.TELEGRAM_BOT_TOKEN
         self._chat_id = config.TELEGRAM_CHAT_ID
         self._dry_run = dry_run
-        # No persistent Bot instance — a fresh one is created per asyncio.run() call
-        # to avoid RuntimeError('Event loop is closed') when called from APScheduler threads.
 
-    # ── Core send ─────────────────────────────────────────────────────────────
-
-    def send_message(self, text: str) -> None:
-        """Send plain text. Errors are logged but never raised (non-blocking)."""
+    def send_message(self, text: str) -> bool:
+        """Send plain text. Returns True on success. Never raises."""
         if self._dry_run:
             print(f"[TELEGRAM DRY-RUN]\n{text}\n{'─' * 50}")
-            return
-        try:
-            async def _send():
-                async with Bot(token=self._token) as bot:
-                    await bot.send_message(chat_id=self._chat_id, text=text)
-            asyncio.run(_send())
-        except TelegramError as exc:
-            logger.error("Telegram send failed: %s", exc)
-        except Exception as exc:
-            logger.error("Unexpected Telegram error: %s", exc)
+            return True
 
-    # ── Formatted alerts ──────────────────────────────────────────────────────
+        async def _send() -> None:
+            async with _build_bot() as bot:
+                await bot.send_message(chat_id=self._chat_id, text=text)
+
+        for attempt in range(1, _TELEGRAM_RETRIES + 1):
+            try:
+                asyncio.run(_send())
+                return True
+            except (TelegramError, NetworkError, OSError) as exc:
+                logger.error(
+                    "Telegram send failed (attempt %d/%d): %s",
+                    attempt, _TELEGRAM_RETRIES, exc,
+                )
+                if attempt < _TELEGRAM_RETRIES:
+                    time.sleep(_TELEGRAM_RETRY_DELAY)
+            except Exception as exc:
+                logger.error("Unexpected Telegram error: %s", exc)
+                return False
+        return False
 
     def send_breakout_alert(self, signal: dict) -> None:
-        """
-        Send a breakout alert and prompt the position sizing calculator.
+        from src.alerts.position_calculator import prompt_trade_setup
 
-        signal dict: {id, symbol, signal_type, candle_close, orb_level, move_pct, candle_time}
-        """
         sym = signal["symbol"].replace("NSE:", "").replace("-EQ", "")
         close = signal["candle_close"]
         orb = signal["orb_level"]
@@ -74,19 +87,20 @@ class TelegramNotifier:
                 f"Time:     {ts}"
             )
 
-        self.send_message(msg)
+        if not self.send_message(msg):
+            logger.error("Breakout alert NOT delivered for %s", sym)
+            return
 
-        # Ask entry + stop loss for position sizing (live mode only)
         if not self._dry_run:
             try:
                 async def _prompt():
-                    async with Bot(token=self._token) as bot:
-                        await prompt_trade_setup(bot, self._chat_id, signal)
+                    async with _build_bot() as bot:
+                        await prompt_trade_setup(bot, int(self._chat_id), signal)
+
                 asyncio.run(_prompt())
             except Exception as exc:
                 logger.error("Trade sizing prompt failed: %s", exc)
 
-        # Mark as alerted in the database
         if signal.get("id"):
             try:
                 db.mark_signal_alerted(signal["id"])
@@ -94,7 +108,6 @@ class TelegramNotifier:
                 logger.error("Failed to mark signal %s alerted: %s", signal["id"], exc)
 
     def send_session_start(self, watchlist: list[str]) -> None:
-        """Sent at 9:15 AM with today's tracked stocks count."""
         msg = (
             f"📊 ORB session started.\n"
             f"Tracking {len(watchlist)} stocks under ₹{config.MAX_STOCK_PRICE:.0f} today.\n"
@@ -104,7 +117,6 @@ class TelegramNotifier:
         self.send_message(msg)
 
     def send_orb_summary(self, passed_symbols: list[str], dropped_count: int) -> None:
-        """Sent at 9:30 AM with the ORB filter result."""
         names = [s.replace("NSE:", "").replace("-EQ", "") for s in passed_symbols]
         msg = (
             f"✅ ORB filter done.\n"
@@ -115,7 +127,6 @@ class TelegramNotifier:
         self.send_message(msg)
 
     def send_session_end(self, signal_count: int) -> None:
-        """Sent at 3:15 PM with a day summary."""
         msg = (
             f"🔔 Session ended.\n"
             f"{signal_count} breakout signal{'s' if signal_count != 1 else ''} today."
@@ -123,20 +134,18 @@ class TelegramNotifier:
         self.send_message(msg)
 
     def send_test_message(self) -> None:
-        """Send a test message to verify credentials."""
         now = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
         self.send_message(f"✅ ORB Bot — test message OK\n{now}")
         logger.info("Test Telegram message sent.")
 
     def prompt_daily_capital(self) -> None:
-        """Ask user for today's capital (once per trading day)."""
         if self._dry_run:
             return
         try:
             from src.alerts.position_calculator import prompt_daily_capital
 
             async def _prompt():
-                async with Bot(token=self._token) as bot:
+                async with _build_bot() as bot:
                     await prompt_daily_capital(bot, int(self._chat_id))
 
             asyncio.run(_prompt())

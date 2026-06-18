@@ -4,6 +4,7 @@ Run once per trading day at ~9:10 AM. Opens a browser for login, then
 prompts the user to paste the redirect URL containing the auth_code.
 Saves the token to config/token.txt with today's date.
 """
+import socket
 import threading
 import time
 import webbrowser
@@ -23,6 +24,18 @@ logger = get_logger(__name__)
 
 IST = pytz.timezone("Asia/Kolkata")
 _TOKEN_FILE = config.CONFIG_DIR / "token.txt"
+_AUTH_URL_FILE = config.CONFIG_DIR / "last_auth_url.txt"
+
+_oauth_lock = threading.Lock()
+_oauth_in_progress = False
+
+
+class OAuthInProgressError(RuntimeError):
+    """Raised when another job is already waiting for the Fyers OAuth callback."""
+
+
+def is_oauth_in_progress() -> bool:
+    return _oauth_in_progress
 
 
 # ── Token persistence ─────────────────────────────────────────────────────────
@@ -112,21 +125,28 @@ def generate_access_token() -> str:
     return token
 
 
-def get_access_token(send_fn: Optional[Callable[[str], None]] = None) -> str:
+def get_access_token(
+    send_fn: Optional[Callable[[str], None]] = None,
+    allow_oauth: bool = True,
+) -> str:
     """
-    Return a valid access token.
-    Uses today's cached token if available; otherwise triggers the VPS-friendly
-    OAuth redirect flow (send_fn delivers the login URL via Telegram).
+    Return a valid access token for today.
 
     Args:
-        send_fn: Callable to send a Telegram message.  If None, the URL is logged.
-
-    Returns:
-        access_token (str) in the format  "<app_id>:<token>"
+        send_fn:     Sends Telegram messages during OAuth (login URL, etc.).
+        allow_oauth: If False, only return a cached token — never start OAuth.
+                     Use False from 09:15 / 09:30 jobs to avoid port conflicts.
     """
     cached = _load_token_if_valid()
     if cached:
         return cached
+
+    if not allow_oauth:
+        raise RuntimeError("No valid Fyers token for today.")
+
+    if is_oauth_in_progress():
+        raise OAuthInProgressError("OAuth already in progress — wait for login to finish.")
+
     logger.info("No valid cached token found — starting OAuth redirect flow.")
     return generate_access_token_via_redirect(send_fn=send_fn)
 
@@ -157,6 +177,23 @@ def generate_access_token_via_redirect(
                       notifier.send_message).  If None, logs instead.
         timeout_secs: Seconds to wait for the callback (default 10 min).
     """
+    global _oauth_in_progress
+
+    if not _oauth_lock.acquire(blocking=False):
+        raise OAuthInProgressError("OAuth already in progress on another job.")
+
+    _oauth_in_progress = True
+    try:
+        return _run_oauth_redirect(send_fn, timeout_secs)
+    finally:
+        _oauth_in_progress = False
+        _oauth_lock.release()
+
+
+def _run_oauth_redirect(
+    send_fn: Optional[Callable[[str], None]],
+    timeout_secs: int,
+) -> str:
     from src import config
 
     port     = config.OAUTH_CALLBACK_PORT
@@ -184,9 +221,8 @@ def generate_access_token_via_redirect(
                 self.end_headers()
 
         def log_message(self, *args):
-            pass  # suppress HTTP access logs
+            pass
 
-    # Build Fyers auth URL
     session = fyersModel.SessionModel(
         client_id=config.FYERS_APP_ID,
         redirect_uri=config.FYERS_REDIRECT_URI,
@@ -197,35 +233,44 @@ def generate_access_token_via_redirect(
     )
     auth_url = session.generate_authcode()
 
+    _AUTH_URL_FILE.write_text(auth_url, encoding="utf-8")
+    logger.info("Fyers auth URL saved to %s", _AUTH_URL_FILE)
+    logger.info("Fyers login URL: %s", auth_url)
+
     msg = (
-        "🔑 *Fyers token expired — tap to login:*\n\n"
+        "🔑 *Fyers login required — tap to authenticate:*\n\n"
         f"{auth_url}\n\n"
-        "_After logging in you will see 'Login successful'. No further action needed._"
+        "_After login you will see 'Login successful'. No further action needed._"
     )
     if send_fn:
-        send_fn(msg)
+        if not send_fn(msg):
+            logger.warning(
+                "Could not deliver auth URL via Telegram — use URL in logs or %s",
+                _AUTH_URL_FILE,
+            )
     else:
-        logger.info("Fyers auth URL: %s", auth_url)
         print(f"\nFyers login URL:\n{auth_url}\n")
 
-    # Start temporary HTTP server (polls with 1 s timeout so we can check deadline)
     server = HTTPServer(("0.0.0.0", port), _Handler)
-    server.timeout = 1
+    server.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     logger.info("Waiting for OAuth callback on port %d (timeout: %ds)…", port, timeout_secs)
+    server.timeout = 1
     deadline = time.monotonic() + timeout_secs
     while not done.is_set():
         server.handle_request()
         if time.monotonic() > deadline:
             server.server_close()
-            err_msg = "⏱ Token refresh timed out (10 min). Please restart the bot and try again."
+            err_msg = (
+                "⏱ Fyers login timed out (10 min).\n"
+                f"Open this URL manually:\n{auth_url}"
+            )
             if send_fn:
                 send_fn(err_msg)
             raise TimeoutError("OAuth callback not received within timeout.")
 
     server.server_close()
 
-    # Exchange auth_code for access_token
     auth_code = received["auth_code"]
     session.set_token(auth_code)
     response = session.generate_token()

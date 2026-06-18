@@ -17,6 +17,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from src.alerts.telegram_notifier import TelegramNotifier
 from src.broker import auth, fyers_client
+from src.broker.auth import OAuthInProgressError, is_oauth_in_progress, is_token_valid
 from src.broker.websocket_handler import TickStreamManager
 from src.strategy.breakout_detector import BreakoutDetector
 from src.strategy.candle_builder import CandleBuilder
@@ -69,31 +70,56 @@ class SessionManager:
             job_fn()
         return wrapped
 
+    def _ensure_token(self, *, allow_oauth: bool) -> bool:
+        """Load today's Fyers token into self._access_token. Returns True on success."""
+        if self._access_token and is_token_valid():
+            return True
+        try:
+            send_fn = self._notifier.send_message if (allow_oauth and not self._dry_run) else None
+            self._access_token = auth.get_access_token(send_fn=send_fn, allow_oauth=allow_oauth)
+            return True
+        except OAuthInProgressError:
+            logger.warning("Fyers OAuth already in progress — skipping this job.")
+            return False
+        except (RuntimeError, TimeoutError) as exc:
+            logger.error("No Fyers token available: %s", exc)
+            return False
+        except Exception:
+            logger.exception("Token load failed.")
+            return False
+
     def _job_08_45(self) -> None:
         """At 8:45 AM check token validity; trigger OAuth refresh if expired."""
-        from src.broker.auth import is_token_valid, generate_access_token_via_redirect
-
         if is_token_valid():
             logger.info("08:45 token check: valid, no refresh needed.")
+            return
+
+        if is_oauth_in_progress():
+            logger.info("08:45 token check: OAuth already running.")
             return
 
         logger.info("08:45 token check: expired — triggering OAuth redirect refresh.")
         send_fn = self._notifier.send_message if not self._dry_run else None
         try:
-            generate_access_token_via_redirect(send_fn=send_fn)
+            self._access_token = auth.generate_access_token_via_redirect(send_fn=send_fn)
             if not self._dry_run:
                 self._notifier.prompt_daily_capital()
         except TimeoutError:
             logger.error("08:45 token refresh timed out.")
+        except OAuthInProgressError:
+            logger.warning("08:45 token refresh skipped — OAuth already in progress.")
         except Exception:
             logger.exception("08:45 token refresh failed.")
 
     def _job_09_10(self) -> None:
         """Auth + build watchlist + Telegram session-start message."""
         logger.info("09:10 job: authenticating…")
+        if is_oauth_in_progress():
+            logger.warning("09:10 job skipped — waiting for OAuth login to finish.")
+            return
         try:
-            send_fn = self._notifier.send_message if not self._dry_run else None
-            self._access_token = auth.get_access_token(send_fn=send_fn)
+            if not self._ensure_token(allow_oauth=True):
+                return
             if not self._dry_run:
                 self._notifier.prompt_daily_capital()
             client = fyers_client.get_client(self._access_token)
@@ -106,22 +132,29 @@ class SessionManager:
 
     def _job_09_15(self) -> None:
         """Start WebSocket tick stream."""
+        if self._ws:
+            self._ws.disconnect()
+            self._ws = None
+
         if not self._watchlist:
             logger.warning("Watchlist empty at 09:15 — attempting rebuild with live prices…")
             try:
-                if not self._access_token:
-                    send_fn = self._notifier.send_message if not self._dry_run else None
-                    self._access_token = auth.get_access_token(send_fn=send_fn)
-                client = fyers_client.get_client(self._access_token)
-                self._watchlist = WatchlistManager(client).build_daily_watchlist()
-                if self._watchlist:
-                    logger.info("09:15 watchlist rebuild complete: %d symbols.", len(self._watchlist))
+                if not self._ensure_token(allow_oauth=False):
+                    logger.error("09:15 watchlist rebuild skipped — no valid token.")
+                else:
+                    client = fyers_client.get_client(self._access_token)
+                    self._watchlist = WatchlistManager(client).build_daily_watchlist()
+                    if self._watchlist:
+                        logger.info("09:15 watchlist rebuild complete: %d symbols.", len(self._watchlist))
             except Exception:
                 logger.exception("09:15 watchlist rebuild failed.")
 
         logger.info("09:15 job: starting WebSocket stream for %d symbols.", len(self._watchlist))
         if not self._watchlist:
             logger.warning("Watchlist is empty — WebSocket not started.")
+            return
+        if not self._access_token:
+            logger.warning("09:15 job skipped — no access token.")
             return
         try:
             self._ws = TickStreamManager(
@@ -136,8 +169,9 @@ class SessionManager:
         """Lock the 9:15–9:30 first candle and run the ORB range filter."""
         logger.info("09:30 job: locking first 15-min ORB levels.")
         try:
-            if not self._access_token:
-                self._access_token = auth.get_access_token()
+            if not self._ensure_token(allow_oauth=False):
+                logger.error("09:30 job skipped — no valid Fyers token.")
+                return
             client = fyers_client.get_client(self._access_token)
             self._orb_levels = self._orb_calc.process_all_symbols(
                 self._candle_builder, self._watchlist, client=client

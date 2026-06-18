@@ -1,10 +1,5 @@
-"""Fyers WebSocket tick stream — streams live LTP ticks for watchlist symbols.
-
-The FyersDataSocket has built-in reconnect support (reconnect=True).
-We wrap it in a thread and provide clean connect/disconnect semantics.
-"""
+"""Fyers WebSocket tick stream — streams live LTP ticks for watchlist symbols."""
 import threading
-import time
 from datetime import datetime
 from typing import Callable
 
@@ -19,13 +14,7 @@ IST = pytz.timezone("Asia/Kolkata")
 
 
 class TickStreamManager:
-    """
-    Streams live ticks from the Fyers WebSocket for a given symbol list.
-
-    Args:
-        symbols:            List of Fyers symbols, e.g. ["NSE:SBIN-EQ", ...]
-        on_tick_callback:   Callable(symbol: str, ltp: float, timestamp: datetime)
-    """
+    """Streams live ticks from the Fyers WebSocket for a given symbol list."""
 
     def __init__(self, symbols: list[str], on_tick_callback: Callable):
         self._symbols = symbols
@@ -33,13 +22,12 @@ class TickStreamManager:
         self._ws: data_ws.FyersDataSocket | None = None
         self._thread: threading.Thread | None = None
         self._connected = False
-
-    # ── Callbacks ─────────────────────────────────────────────────────────────
+        self._active = False
 
     def _on_message(self, message: dict) -> None:
-        """Parse incoming tick and forward to callback."""
+        if not self._active:
+            return
         try:
-            # FyersDataSocket delivers a list of tick dicts in "SymbolUpdate" mode
             ticks = message if isinstance(message, list) else [message]
             for tick in ticks:
                 symbol = tick.get("symbol") or tick.get("n")
@@ -52,25 +40,25 @@ class TickStreamManager:
             logger.exception("Error processing tick: %s", message)
 
     def _on_connect(self) -> None:
+        if not self._active:
+            return
         logger.info("WebSocket connected — subscribing to %d symbols", len(self._symbols))
         self._connected = True
         if self._ws:
             self._ws.subscribe(symbols=self._symbols, data_type="SymbolUpdate")
 
     def _on_error(self, message: dict) -> None:
+        if not self._active:
+            return
         logger.error("WebSocket error: %s", message)
 
     def _on_close(self, message: dict) -> None:
         logger.warning("WebSocket closed: %s", message)
         self._connected = False
 
-    # ── Public API ─────────────────────────────────────────────────────────────
-
     def connect(self, access_token: str) -> None:
-        """
-        Initialise the WebSocket and start it in a background thread.
-        The SDK handles reconnects internally (reconnect=True).
-        """
+        """Start the WebSocket in a background thread."""
+        self._active = True
         self._ws = data_ws.FyersDataSocket(
             access_token=access_token,
             write_to_file=False,
@@ -92,16 +80,34 @@ class TickStreamManager:
         logger.info("WebSocket thread started.")
 
     def disconnect(self) -> None:
-        """Cleanly close the WebSocket connection."""
-        if self._ws:
-            try:
-                self._ws.unsubscribe(symbols=self._symbols, data_type="SymbolUpdate")
-            except Exception:
-                pass
-            self._connected = False
-            self._ws = None
-            logger.info("WebSocket disconnected.")
+        """Stop ticks and tear down the SDK reconnect loop."""
+        self._active = False
+        self._connected = False
+        ws = self._ws
+        self._ws = None
+
+        if ws is None:
+            return
+
+        for attr in ("keep_running", "Keep_running"):
+            if hasattr(ws, attr):
+                try:
+                    setattr(ws, attr, False)
+                except Exception:
+                    pass
+
+        for method_name in ("close_connection", "close", "disconnect", "stop"):
+            method = getattr(ws, method_name, None)
+            if callable(method):
+                try:
+                    method()
+                    logger.debug("WebSocket %s() called", method_name)
+                    break
+                except Exception:
+                    logger.debug("WebSocket %s() failed", method_name, exc_info=True)
+
+        logger.info("WebSocket disconnected.")
 
     @property
     def is_connected(self) -> bool:
-        return self._connected
+        return self._connected and self._active

@@ -100,8 +100,20 @@ def main() -> None:
             import asyncio
             import threading
             from telegram.ext import Application
+            from telegram.request import HTTPXRequest
             from src.alerts.position_calculator import build_position_handlers
-            _tg_app = Application.builder().token(cfg.TELEGRAM_BOT_TOKEN).build()
+            _tg_request = HTTPXRequest(
+                connect_timeout=30.0,
+                read_timeout=30.0,
+                write_timeout=30.0,
+                pool_timeout=30.0,
+            )
+            _tg_app = (
+                Application.builder()
+                .token(cfg.TELEGRAM_BOT_TOKEN)
+                .request(_tg_request)
+                .build()
+            )
             for handler in build_position_handlers():
                 _tg_app.add_handler(handler)
 
