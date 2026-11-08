@@ -23,19 +23,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Create deployment archive
+      - name: Package application
         run: |
-          tar -czf orbit-release.tar.gz \
+          tar -czf /tmp/orbit-release.tar.gz \
             --exclude='.git' \
             --exclude='.github' \
             --exclude='.env' \
             --exclude='.venv' \
             --exclude='venv' \
             --exclude='__pycache__' \
+            --exclude='*.pyc' \
+            --exclude='.pytest_cache' \
             --exclude='config/token.txt' \
             --exclude='data/*.db' \
             --exclude='logs/*.log' \
-            .
+            -C "$GITHUB_WORKSPACE" .
 
       - name: Transfer application to VPS
         uses: appleboy/scp-action@v0.1.7
@@ -44,8 +46,8 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
-          source: "orbit-release.tar.gz"
-          target: "/tmp/"
+          source: "/tmp/orbit-release.tar.gz"
+          target: "/tmp"
 
       - name: Deploy application
         uses: appleboy/ssh-action@v1.2.0
@@ -58,32 +60,17 @@ jobs:
           script: |
             set -e
 
-            echo "Starting ORBit deployment..."
+            test -f /opt/orbit/.env || {
+              echo "ERROR: /opt/orbit/.env is missing"
+              exit 1
+            }
 
             mkdir -p /opt/orbit/app
-            mkdir -p /opt/orbit/config
-            mkdir -p /opt/orbit/data
-            mkdir -p /opt/orbit/logs
-
-            if [ ! -f /opt/orbit/.env ]; then
-              echo "ERROR: ORBit .env file is missing"
-              exit 1
-            fi
+            tar -xzf /tmp/orbit-release.tar.gz -C /opt/orbit/app
 
             cd /opt/orbit/app
-
-            tar -xzf /tmp/orbit-release.tar.gz
-
-            rm -f /tmp/orbit-release.tar.gz
-
             docker compose up -d --build --remove-orphans
 
-            echo "Waiting for ORBit container..."
-
             sleep 5
-
-            docker ps --filter "name=orbot"
-
+            docker ps --filter name=orbot
             docker logs --tail 50 orbot
-
-            echo "ORBit deployment completed."
