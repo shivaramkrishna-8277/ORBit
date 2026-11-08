@@ -25,7 +25,7 @@ jobs:
 
       - name: Package application
         run: |
-          tar -czf /tmp/orbit-release.tar.gz \
+          tar -czf "$RUNNER_TEMP/orbit-release.tar.gz" \
             --exclude='.git' \
             --exclude='.github' \
             --exclude='.env' \
@@ -39,6 +39,11 @@ jobs:
             --exclude='logs/*.log' \
             -C "$GITHUB_WORKSPACE" .
 
+          cp "$RUNNER_TEMP/orbit-release.tar.gz" \
+            "$GITHUB_WORKSPACE/orbit-release.tar.gz"
+
+          ls -lh "$GITHUB_WORKSPACE/orbit-release.tar.gz"
+
       - name: Transfer application to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -46,7 +51,7 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT }}
-          source: "/tmp/orbit-release.tar.gz"
+          source: "orbit-release.tar.gz"
           target: "/tmp"
 
       - name: Deploy application
@@ -60,17 +65,31 @@ jobs:
           script: |
             set -e
 
+            echo "Checking environment file..."
             test -f /opt/orbit/.env || {
               echo "ERROR: /opt/orbit/.env is missing"
               exit 1
             }
 
+            echo "Checking deployment archive..."
+            test -f /tmp/orbit-release.tar.gz
+
+            echo "Extracting application..."
             mkdir -p /opt/orbit/app
             tar -xzf /tmp/orbit-release.tar.gz -C /opt/orbit/app
 
+            rm -f /tmp/orbit-release.tar.gz
+
             cd /opt/orbit/app
+
+            echo "Building and starting ORBit..."
             docker compose up -d --build --remove-orphans
 
+            echo "Waiting for startup..."
             sleep 5
+
+            echo "Container status:"
             docker ps --filter name=orbot
+
+            echo "Recent application logs:"
             docker logs --tail 50 orbot
