@@ -1,24 +1,31 @@
-FROM python:3.13-slim
 
-# System deps (needed by fyers-apiv3 and some crypto libs)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        gcc \
-        libffi-dev \
-    && rm -rf /var/lib/apt/lists/*
+FROM python:3.11-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# Install Python dependencies first (layer-cached unless requirements.txt changes)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libffi-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy source code
+# Install Python dependencies
+COPY requirements.txt .
+
+RUN python -m pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Copy application source
 COPY . .
 
-# Runtime directories (volumes will overlay these, but they must exist in the image)
-RUN mkdir -p config data logs
+# Create required directories
+RUN mkdir -p /app/config /app/data /app/logs
 
-# OAuth callback port (Fyers redirect URI)
 EXPOSE 8080
 
 CMD ["python", "main.py"]
