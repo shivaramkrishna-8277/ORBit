@@ -10,6 +10,7 @@ if str(ROOT) not in sys.path:
 import pytz
 import streamlit as st
 
+from src.broker.symbol_search import load_master, resolve_nse_equity, search_nse_equity
 from src.config import NIFTY50_SYMBOLS
 from src.strategy.runtime_settings import (
     BREAKOUT_TIMEFRAMES,
@@ -54,27 +55,88 @@ st.caption(
 
 left, right = st.columns([1.1, 1], gap="large")
 
+def _add_symbol(symbol: str) -> None:
+    try:
+        symbol = normalize_symbol(symbol)
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    if symbol not in st.session_state.symbols:
+        st.session_state.symbols.append(symbol)
+        st.session_state.symbols.sort()
+    st.rerun()
+
+
 with left:
     st.subheader(f"Tracking list ({len(st.session_state.symbols)})")
+    st.caption("Search uses Fyers NSE symbol master (EQ series). Pick a match or add manually.")
+
+    if "sym_master" not in st.session_state:
+        st.session_state.sym_master = None
+    if "sym_search_hits" not in st.session_state:
+        st.session_state.sym_search_hits = []
+
+    q_col, search_btn = st.columns([3, 1])
+    with q_col:
+        symbol_query = st.text_input(
+            "Search symbol or company",
+            key="symbol_search_query",
+            placeholder="Type RELIANCE, TCS, bank…",
+        )
+    with search_btn:
+        st.write("")
+        do_search = st.button("Search", use_container_width=True)
+
+    if do_search and symbol_query.strip():
+        try:
+            if st.session_state.sym_master is None:
+                with st.spinner("Loading Fyers symbol list…"):
+                    st.session_state.sym_master = load_master()
+            st.session_state.sym_search_hits = search_nse_equity(
+                symbol_query,
+                master=st.session_state.sym_master,
+                limit=25,
+            )
+        except Exception as exc:
+            st.error(f"Symbol search failed: {exc}")
+            st.session_state.sym_search_hits = []
+
+    hits = st.session_state.sym_search_hits
+    if hits:
+        labels = [f"{h['ticker']} — {h['name']}" if h["name"] else h["symbol"] for h in hits]
+        pick = st.selectbox("Suggestions", options=labels, index=0)
+        pick_idx = labels.index(pick)
+        chosen = hits[pick_idx]["symbol"]
+        if st.button("Add selected", type="primary", use_container_width=True):
+            _add_symbol(chosen)
+    elif do_search and symbol_query.strip():
+        st.warning("No NSE EQ matches. Try a shorter ticker or company name.")
+
     add_col, add_btn = st.columns([3, 1])
     with add_col:
         new_symbol = st.text_input(
-            "Add symbol",
+            "Add manually",
             placeholder="RELIANCE or NSE:RELIANCE-EQ",
             label_visibility="collapsed",
         )
     with add_btn:
         st.write("")
         if st.button("Add", use_container_width=True):
-            try:
-                symbol = normalize_symbol(new_symbol)
-            except ValueError as exc:
-                st.error(str(exc))
-            else:
-                if symbol not in st.session_state.symbols:
-                    st.session_state.symbols.append(symbol)
-                    st.session_state.symbols.sort()
-                st.rerun()
+            symbol = new_symbol.strip()
+            if symbol and st.session_state.sym_master is not None:
+                resolved = resolve_nse_equity(symbol, master=st.session_state.sym_master)
+                if resolved:
+                    symbol = resolved
+            elif symbol:
+                try:
+                    with st.spinner("Resolving symbol…"):
+                        st.session_state.sym_master = load_master()
+                    resolved = resolve_nse_equity(symbol, master=st.session_state.sym_master)
+                    if resolved:
+                        symbol = resolved
+                except Exception as exc:
+                    st.warning(f"Could not load symbol master ({exc}); using typed value.")
+            _add_symbol(symbol)
 
     nifty_col, reload_col = st.columns(2)
     with nifty_col:
