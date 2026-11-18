@@ -82,6 +82,11 @@ jobs:
 
             cd /opt/orbit/app
 
+            echo "Linking environment file into the app directory..."
+            rm -f /opt/orbit/app/.env
+            ln -s /opt/orbit/.env /opt/orbit/app/.env
+            mkdir -p /opt/orbit/config /opt/orbit/data /opt/orbit/logs
+
             echo "Building and starting ORBit..."
             docker compose up -d --build --remove-orphans
 
