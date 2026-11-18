@@ -86,6 +86,8 @@ class TelegramNotifier:
                 f"Move:     -{move:.2f}% below ORB\n"
                 f"Time:     {ts}"
             )
+        if signal.get("recalc"):
+            msg += "\nRecalculated from today's candles."
 
         if not self.send_message(msg):
             logger.error("Breakout alert NOT delivered for %s", sym)
@@ -107,20 +109,42 @@ class TelegramNotifier:
             except Exception as exc:
                 logger.error("Failed to mark signal %s alerted: %s", signal["id"], exc)
 
-    def send_session_start(self, watchlist: list[str]) -> None:
+    def send_session_start(self, watchlist: list[str], settings=None) -> None:
+        if settings is not None and settings.max_price_enabled:
+            scope = f"under ₹{settings.max_stock_price:.0f}"
+        elif settings is not None:
+            scope = "price filter off"
+        else:
+            scope = f"under ₹{config.MAX_STOCK_PRICE:.0f}"
+        names = [s.replace("NSE:", "").replace("-EQ", "") for s in watchlist[:10]]
         msg = (
             f"📊 ORB session started.\n"
-            f"Tracking {len(watchlist)} stocks under ₹{config.MAX_STOCK_PRICE:.0f} today.\n"
-            f"Watching: {', '.join(s.replace('NSE:', '').replace('-EQ', '') for s in watchlist[:10])}"
+            f"Tracking {len(watchlist)} stocks ({scope}) today.\n"
+            f"Watching: {', '.join(names)}"
             + (f" … +{len(watchlist) - 10} more" if len(watchlist) > 10 else "")
         )
         self.send_message(msg)
 
-    def send_orb_summary(self, passed_symbols: list[str], dropped_count: int) -> None:
+    def send_orb_summary(
+        self,
+        passed_symbols: list[str],
+        dropped_count: int,
+        settings=None,
+        recalc: bool = False,
+    ) -> None:
+        threshold = settings.orb_range_threshold if settings is not None else config.ORB_RANGE_THRESHOLD
         names = [s.replace("NSE:", "").replace("-EQ", "") for s in passed_symbols]
+        title = "🔁 ORB recalculated." if recalc else "✅ ORB filter done."
+        window = ""
+        if settings is not None:
+            window = (
+                f"Window: 09:15–{settings.orb_end_label} ({settings.orb_duration_minutes} min). "
+                f"Breakout candles: {settings.breakout_timeframe_minutes} min.\n"
+            )
         msg = (
-            f"✅ ORB filter done.\n"
-            f"{len(passed_symbols)} stocks qualify | {dropped_count} dropped (range > {config.ORB_RANGE_THRESHOLD}%)\n"
+            f"{title}\n"
+            f"{window}"
+            f"{len(passed_symbols)} stocks qualify | {dropped_count} dropped (range > {threshold:g}%)\n"
         )
         if names:
             msg += "Qualifying: " + ", ".join(names)

@@ -7,3 +7,4 @@ pytz
 requests
 schedule
 pytest
+streamlit>=1.40,<2

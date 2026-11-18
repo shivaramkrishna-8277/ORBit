@@ -107,6 +107,20 @@ class TestCandleBuilder:
 
         assert on_close.call_count == 1
 
+    @patch("src.strategy.candle_builder.db")
+    def test_five_minute_opening_range_rolls_at_9_20(self, mock_db):
+        from src.strategy.candle_builder import CandleBuilder
+        on_close = MagicMock()
+        cb = CandleBuilder(on_candle_close=on_close, orb_minutes=5, breakout_minutes=5)
+        symbol = "NSE:SBIN-EQ"
+        cb.on_tick(symbol, 100.0, ist(9, 15, 0))
+        cb.on_tick(symbol, 101.0, ist(9, 19, 30))
+        cb.on_tick(symbol, 102.0, ist(9, 20, 0))
+        on_close.assert_called_once()
+        closed = on_close.call_args[0][1]
+        assert closed["close"] == 101.0
+        assert cb.get_current_candle(symbol)["open"] == 102.0
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ORBCalculator
@@ -155,6 +169,23 @@ class TestORBCalculator:
         candle = {"open": 100.0, "high": 102.0, "low": 100.0, "close": 101.0}
         result = calc.calculate_orb("NSE:SBIN-EQ", candle)
         assert result is None
+
+    @patch("src.strategy.orb_calculator.db")
+    def test_price_filter_off_keeps_a_stock_above_the_old_cap(self, mock_db):
+        from src.strategy.orb_calculator import ORBCalculator
+        from src.strategy.runtime_settings import StrategySettings
+        calc = ORBCalculator()
+        settings = StrategySettings(
+            symbols=["NSE:TCS-EQ"],
+            max_price_enabled=False,
+            max_stock_price=800,
+            orb_range_threshold=0.6,
+            orb_duration_minutes=15,
+            breakout_timeframe_minutes=15,
+        )
+        candle = {"open": 5000.0, "high": 5001.0, "low": 5000.0, "close": 5000.5}
+        result = calc.calculate_orb("NSE:TCS-EQ", candle, settings=settings)
+        assert result is not None
 
 
 # ══════════════════════════════════════════════════════════════════════════════

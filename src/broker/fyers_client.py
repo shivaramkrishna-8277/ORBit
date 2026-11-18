@@ -64,12 +64,22 @@ def _call_with_retry(fn, *args, **kwargs):
 
 def get_quotes(client: FyersModel, symbols: list[str]) -> dict[str, dict]:
     """
-    Fetch live quotes for up to 50 symbols.
+    Fetch live quotes. Fyers accepts at most 50 symbols per call, so longer
+    lists are requested in batches.
 
     Returns:
         {symbol: {"ltp": float, "open": float, "high": float, "low": float, "close": float}}
         Only symbols with a successful "s": "ok" sub-response are included.
     """
+    if not symbols:
+        return {}
+    merged: dict[str, dict] = {}
+    for start in range(0, len(symbols), 40):
+        merged.update(_get_quotes_chunk(client, symbols[start:start + 40]))
+    return merged
+
+
+def _get_quotes_chunk(client: FyersModel, symbols: list[str]) -> dict[str, dict]:
     # Fyers quotes endpoint accepts a comma-separated string, max 50 symbols
     payload = {"symbols": ",".join(symbols)}
     response = _call_with_retry(client.quotes, payload)

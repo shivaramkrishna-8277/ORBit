@@ -1,15 +1,17 @@
 """Central session orchestrator — wires all components and manages the trading day.
 
 Scheduled jobs (all times IST, Mon–Fri, non-holiday only):
+  08:45  — refresh the Fyers token when it is expired
   09:10  — auth + build watchlist + session-start Telegram message
   09:15  — start WebSocket tick stream
-  09:30  — lock first 15-min candle (9:15–9:30), run ORB filter, send summary
-  09:45–15:15 (every 15 min) — flush candles, run breakout checks
+  every minute — lock the opening range when it ends, then flush breakout candles
   15:15  — stop WebSocket, send session-end summary, reset state
 
-Use APScheduler BackgroundScheduler with Asia/Kolkata timezone.
+Opening-range length and breakout candle size come from the dashboard settings.
+A pending recalculation command clears today's signals and sends them again.
 """
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -21,7 +23,14 @@ from src.broker.auth import OAuthInProgressError, is_oauth_in_progress, is_token
 from src.broker.websocket_handler import TickStreamManager
 from src.strategy.breakout_detector import BreakoutDetector
 from src.strategy.candle_builder import CandleBuilder
+from src.strategy.intraday_agg import (
+    bars_from_frame,
+    closed_breakout_candles,
+    market_open,
+    opening_range_candle,
+)
 from src.strategy.orb_calculator import ORBCalculator
+from src.strategy.runtime_settings import StrategySettings, load_settings
 from src.strategy.watchlist import WatchlistManager
 from src.utils import db
 from src.utils.logger import get_logger
@@ -46,6 +55,9 @@ class SessionManager:
         self._watchlist: list[str] = []
         self._orb_levels: dict[str, dict] = {}
         self._access_token: str = ""
+        self._orb_locked_on: str = ""
+        self._job_lock = threading.RLock()
+        self._settings_stamp: str = ""
 
     # ── Tick & candle routing ──────────────────────────────────────────────────
 
@@ -125,7 +137,7 @@ class SessionManager:
             client = fyers_client.get_client(self._access_token)
             manager = WatchlistManager(client)
             self._watchlist = manager.build_daily_watchlist()
-            self._notifier.send_session_start(self._watchlist)
+            self._notifier.send_session_start(self._watchlist, load_settings())
             logger.info("09:10 job complete. Watchlist: %d symbols.", len(self._watchlist))
         except Exception:
             logger.exception("09:10 job failed.")
@@ -136,18 +148,16 @@ class SessionManager:
             self._ws.disconnect()
             self._ws = None
 
-        if not self._watchlist:
-            logger.warning("Watchlist empty at 09:15 — attempting rebuild with live prices…")
-            try:
-                if not self._ensure_token(allow_oauth=False):
-                    logger.error("09:15 watchlist rebuild skipped — no valid token.")
-                else:
-                    client = fyers_client.get_client(self._access_token)
-                    self._watchlist = WatchlistManager(client).build_daily_watchlist()
-                    if self._watchlist:
-                        logger.info("09:15 watchlist rebuild complete: %d symbols.", len(self._watchlist))
-            except Exception:
-                logger.exception("09:15 watchlist rebuild failed.")
+        try:
+            if self._ensure_token(allow_oauth=False):
+                client = fyers_client.get_client(self._access_token)
+                refreshed = WatchlistManager(client).build_daily_watchlist()
+                self._watchlist = refreshed
+                logger.info("09:15 watchlist loaded from dashboard settings: %d symbols.", len(self._watchlist))
+            else:
+                logger.error("09:15 watchlist refresh skipped — no valid token.")
+        except Exception:
+            logger.exception("09:15 watchlist refresh failed.")
 
         logger.info("09:15 job: starting WebSocket stream for %d symbols.", len(self._watchlist))
         if not self._watchlist:
@@ -165,39 +175,210 @@ class SessionManager:
         except Exception:
             logger.exception("09:15 job failed (WebSocket start).")
 
-    def _job_09_30(self) -> None:
-        """Lock the 9:15–9:30 first candle and run the ORB range filter."""
-        logger.info("09:30 job: locking first 15-min ORB levels.")
-        try:
-            if not self._ensure_token(allow_oauth=False):
-                logger.error("09:30 job skipped — no valid Fyers token.")
-                return
-            client = fyers_client.get_client(self._access_token)
-            self._orb_levels = self._orb_calc.process_all_symbols(
-                self._candle_builder, self._watchlist, client=client
-            )
-            self._breakout = BreakoutDetector(
-                orb_levels=self._orb_levels,
-                on_breakout_callback=self._on_breakout,
-            )
-            dropped = len(self._watchlist) - len(self._orb_levels)
-            self._notifier.send_orb_summary(list(self._orb_levels.keys()), dropped)
-            logger.info("09:30 job complete. ORB active for %d symbols.", len(self._orb_levels))
-        except Exception:
-            logger.exception("09:30 job failed.")
+    def _apply_candle_intervals(self, settings: StrategySettings) -> None:
+        self._candle_builder.set_intervals(
+            settings.orb_duration_minutes,
+            settings.breakout_timeframe_minutes,
+        )
+        self._settings_stamp = settings.updated_at
 
-    def _job_candle_tick(self) -> None:
-        """Flush current in-progress candles (runs every 15 min, 09:45–15:15)."""
-        now_str = datetime.now(IST).strftime("%H:%M")
-        logger.debug("Candle flush at %s", now_str)
+    def _restart_stream(self, symbols: list[str]) -> None:
+        """Reconnect the tick stream when the tracking list changes mid-session."""
+        now = datetime.now(IST)
+        if now < market_open(now):
+            return
+        if self._ws is not None and set(self._ws._symbols) == set(symbols):
+            return
+        if self._ws:
+            self._ws.disconnect()
+            self._ws = None
+        if not symbols or not self._access_token:
+            return
+        self._ws = TickStreamManager(symbols=symbols, on_tick_callback=self._on_tick)
+        self._ws.connect(self._access_token)
+
+    def _history_bars(self, client, symbol: str, today: str) -> list[dict]:
+        frame = fyers_client.get_historical_candles(client, symbol, "1", today, today)
+        return bars_from_frame(frame)
+
+    def _run_orb(self, *, clear_signals: bool, rescan: bool) -> str:
+        """Lock today's opening range and, when requested, replay breakout candles.
+
+        clear_signals=True is the dashboard recalculation: today's alerts are
+        deleted first, then every qualifying breakout is sent once.
+        """
+        settings = load_settings()
+        self._apply_candle_intervals(settings)
+        now = datetime.now(IST)
+        today = now.strftime("%Y-%m-%d")
+        orb_end = market_open(now) + timedelta(minutes=settings.orb_duration_minutes)
+
+        if not is_market_open(now):
+            raise RuntimeError(f"{today} is not an NSE trading day.")
+        if now < orb_end:
+            raise RuntimeError(
+                f"The opening range is still forming. It ends at {settings.orb_end_label} IST."
+            )
+        if not self._ensure_token(allow_oauth=False):
+            raise RuntimeError("No valid Fyers token. Log in from the bot and try again.")
+
+        client = fyers_client.get_client(self._access_token)
+        self._watchlist = WatchlistManager(client).build_daily_watchlist()
+        if not self._watchlist:
+            self._orb_locked_on = today
+            self._breakout = None
+            self._orb_levels = {}
+            self._notifier.send_message(
+                "Tracking list is empty. Add symbols in the dashboard, then recalculate."
+            )
+            return "Tracking list is empty."
+
+        self._restart_stream(self._watchlist)
+        # Live closes must not fire while today's candles are replayed.
+        self._breakout = None
+        self._candle_builder.flush_completed(orb_end)
+
+        if clear_signals:
+            db.delete_signals(today)
+        db.delete_orb_levels(today)
+
+        passed: dict[str, dict] = {}
+        replay: dict[str, list[dict]] = {}
+        missing = 0
+
+        for symbol in self._watchlist:
+            bars = self._history_bars(client, symbol, today)
+            candle = opening_range_candle(bars, now, settings.orb_duration_minutes)
+            if candle is None and not clear_signals:
+                candle = self._candle_builder.get_first_candle(symbol)
+                if candle is not None:
+                    logger.warning("%s — exchange opening range incomplete; using tick candle.", symbol)
+            if candle is None:
+                missing += 1
+                logger.warning("%s — no opening-range candle available.", symbol)
+                continue
+
+            result = self._orb_calc.calculate_orb(symbol, candle, settings=settings)
+            if not result:
+                continue
+            passed[symbol] = {"orb_high": result["orb_high"], "orb_low": result["orb_low"]}
+            if rescan:
+                replay[symbol] = closed_breakout_candles(
+                    bars,
+                    now,
+                    settings.orb_duration_minutes,
+                    settings.breakout_timeframe_minutes,
+                    now,
+                )
+
+        if not passed and missing == len(self._watchlist):
+            logger.warning(
+                "Opening range not ready for any of %d symbols. Will retry next minute.",
+                missing,
+            )
+            return "Opening range candles are not ready yet. The bot will retry."
+
+        self._candle_builder.skip_partial_bucket(now)
+        dropped = len(self._watchlist) - len(passed)
+        self._notifier.send_orb_summary(
+            list(passed.keys()), dropped, settings=settings, recalc=clear_signals,
+        )
+
+        def _on_signal(signal: dict) -> None:
+            if clear_signals:
+                signal["recalc"] = True
+            self._on_breakout(signal)
+
+        detector = BreakoutDetector(orb_levels=passed, on_breakout_callback=_on_signal)
+        sent = 0
+        if rescan:
+            for symbol, candles in replay.items():
+                for candle in candles:
+                    before = len(db.get_signals(today))
+                    detector.check_candle(symbol, candle)
+                    if len(db.get_signals(today)) > before:
+                        sent += 1
+
+        self._orb_levels = passed
+        self._breakout = detector
+        self._orb_locked_on = today
+        logger.info(
+            "ORB active for %d symbols. Breakout alerts sent this run: %d. Missing candles: %d.",
+            len(passed), sent, missing,
+        )
+        return (
+            f"{len(passed)} symbols qualify, {dropped} dropped, "
+            f"{sent} breakout alert{'s' if sent != 1 else ''} sent, {missing} missing candles."
+        )
+
+    def _job_clock(self) -> None:
+        """Lock the opening range once it ends, then flush each breakout candle."""
+        if not self._job_lock.acquire(blocking=False):
+            return
         try:
-            self._candle_builder.flush_all()
+            if not is_market_open():
+                return
+            settings = load_settings()
+            self._apply_candle_intervals(settings)
+            now = datetime.now(IST)
+            stamp = now.replace(second=0, microsecond=0)
+            today = stamp.strftime("%Y-%m-%d")
+            close = stamp.replace(hour=15, minute=15, second=0, microsecond=0)
+            if stamp > close:
+                return
+            orb_end = market_open(now) + timedelta(minutes=settings.orb_duration_minutes)
+            if stamp < orb_end:
+                return
+            if self._orb_locked_on != today:
+                try:
+                    self._run_orb(clear_signals=False, rescan=True)
+                except Exception:
+                    logger.exception("ORB lock failed.")
+                return
+            elapsed = int((stamp - orb_end).total_seconds())
+            step = settings.breakout_timeframe_minutes * 60
+            if elapsed > 0 and elapsed % step == 0:
+                self._candle_builder.flush_completed(stamp)
+        finally:
+            self._job_lock.release()
+
+    def _poll_dashboard(self) -> None:
+        """Pick up a recalculation requested from the dashboard."""
+        try:
+            settings = load_settings()
+            self._apply_candle_intervals(settings)
         except Exception:
-            logger.exception("Candle flush failed at %s", now_str)
+            logger.exception("Could not read dashboard settings.")
+            return
+        if not self._job_lock.acquire(blocking=False):
+            return
+        try:
+            command = db.claim_next_command()
+            if command is None:
+                return
+            try:
+                detail = self._run_orb(clear_signals=True, rescan=True)
+                db.finish_command(
+                    command["id"], "done", detail,
+                    datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+                )
+                logger.info("Dashboard recalculation finished: %s", detail)
+            except Exception as exc:
+                logger.exception("Dashboard recalculation failed.")
+                db.finish_command(
+                    command["id"], "error", str(exc),
+                    datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+                )
+        finally:
+            self._job_lock.release()
 
     def _job_15_15(self) -> None:
         """Session end: stop stream, send summary, reset state."""
         logger.info("15:15 job: ending session.")
+        with self._job_lock:
+            self._end_session()
+
+    def _end_session(self) -> None:
         try:
             if self._ws:
                 self._ws.disconnect()
@@ -213,6 +394,7 @@ class SessionManager:
             self._orb_levels = {}
             self._watchlist = []
             self._access_token = ""
+            self._orb_locked_on = ""
             logger.info("Session ended. %d signals today.", len(signals))
         except Exception:
             logger.exception("15:15 job failed.")
@@ -226,25 +408,37 @@ class SessionManager:
                 day_of_week="mon-fri", hour=hour, minute=minute, second=second, timezone=IST
             )
 
-        self._scheduler.add_job(self._trading_day_only(self._job_08_45), cron(8, 45),      id="job_08_45",   replace_existing=True)
-        self._scheduler.add_job(self._trading_day_only(self._job_09_10), cron(9, 10),      id="job_09_10",   replace_existing=True)
-        self._scheduler.add_job(self._trading_day_only(self._job_09_15), cron(9, 15),      id="job_09_15",   replace_existing=True)
-        self._scheduler.add_job(self._trading_day_only(self._job_09_30), cron(9, 30, 5),   id="job_09_30",   replace_existing=True)
-        self._scheduler.add_job(self._trading_day_only(self._job_15_15), cron(15, 15), id="job_15_15",   replace_existing=True)
-
-        # Candle flush every 15 min from 09:45 to 15:15
-        for minute_offset in range(45, 60, 15):  # 9:45
-            self._scheduler.add_job(self._trading_day_only(self._job_candle_tick), cron(9, minute_offset),
-                                    id=f"flush_09_{minute_offset:02d}", replace_existing=True)
-        for hour in range(10, 16):
-            for minute in range(0, 60, 15):
-                if hour == 15 and minute > 15:
-                    break
-                self._scheduler.add_job(self._trading_day_only(self._job_candle_tick), cron(hour, minute),
-                                        id=f"flush_{hour:02d}_{minute:02d}", replace_existing=True)
+        self._scheduler.add_job(self._trading_day_only(self._job_08_45), cron(8, 45), id="job_08_45", replace_existing=True)
+        self._scheduler.add_job(self._trading_day_only(self._job_09_10), cron(9, 10), id="job_09_10", replace_existing=True)
+        self._scheduler.add_job(self._trading_day_only(self._job_09_15), cron(9, 15), id="job_09_15", replace_existing=True)
+        self._scheduler.add_job(
+            self._trading_day_only(self._job_15_15), cron(15, 15, 20), id="job_15_15", replace_existing=True,
+        )
+        # Second 5 of every minute: lock the opening range, then close breakout candles.
+        self._scheduler.add_job(
+            self._job_clock,
+            CronTrigger(day_of_week="mon-fri", hour="9-15", minute="*", second=5, timezone=IST),
+            id="job_clock",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        self._scheduler.add_job(
+            self._poll_dashboard,
+            "interval",
+            seconds=5,
+            id="dashboard_poll",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
 
     def start(self) -> None:
         """Start the scheduler. Blocks until stop() is called."""
+        try:
+            self._apply_candle_intervals(load_settings())
+        except Exception:
+            logger.exception("Could not load dashboard settings at startup. Using 15/15 until the next poll.")
         self._schedule_jobs()
         self._scheduler.start()
         logger.info("SessionManager started. Waiting for scheduled jobs…")

@@ -11,7 +11,7 @@ services:
     restart: unless-stopped
 
     env_file:
-      - ../.env
+      - ./.env
 
     dns:
       - 8.8.8.8
@@ -31,5 +31,41 @@ services:
         max-size: "10m"
         max-file: "5"
 
+    security_opt:
+      - no-new-privileges:true
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: orbit-python:latest
+    container_name: orbit-dashboard
+    restart: unless-stopped
+    depends_on:
+      - orbot
+    env_file:
+      - .env
+    command:
+      - streamlit
+      - run
+      - dashboard/app.py
+      - --server.port=8501
+      - --server.address=0.0.0.0
+      - --server.headless=true
+      - --browser.gatherUsageStats=false
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    volumes:
+      - ../config:/app/config
+      - ../data:/app/data
+      - ../logs:/app/logs
+    ports:
+      - "127.0.0.1:8501:8501"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     security_opt:
       - no-new-privileges:true

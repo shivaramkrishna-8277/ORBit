@@ -1,12 +1,13 @@
-"""Daily watchlist builder — filters Nifty 50 to stocks under MAX_STOCK_PRICE."""
+"""Daily watchlist builder — uses the dashboard tracking list."""
 from datetime import datetime
 
 import pytz
 
-from src import config
 from src.broker import fyers_client
+from src.strategy.runtime_settings import load_settings
 from src.utils import db
 from src.utils.logger import get_logger
+from src.utils.quote_price import quote_filter_price
 
 logger = get_logger(__name__)
 
@@ -23,23 +24,45 @@ class WatchlistManager:
 
     def build_daily_watchlist(self) -> list[str]:
         """
-        Fetch live prices, apply the price filter, persist to SQLite,
-        and return the list of qualifying symbols.
+        Take the dashboard symbol list, optionally drop names at or above the
+        max price, persist the result, and return the symbols to track today.
         """
         today = datetime.now(IST).strftime("%Y-%m-%d")
-        prices = fyers_client.get_nifty50_prices(self._client)
+        settings = load_settings()
+        symbols = list(settings.symbols)
+        db.delete_watchlist(today)
 
-        symbols: list[str] = []
-        for sym, data in prices.items():
-            price = data.get("filter_price", data["ltp"])
-            db.insert_watchlist(today, sym, price)
-            symbols.append(sym)
+        if not symbols:
+            logger.warning("Tracking list is empty. Add symbols in the dashboard.")
+            return []
 
-        logger.info(
-            "%d of 50 Nifty stocks under ₹%.0f today (%s)",
-            len(symbols), config.MAX_STOCK_PRICE, today,
-        )
-        return sorted(symbols)
+        quotes = fyers_client.get_quotes(self._client, symbols)
+        kept: list[str] = []
+        dropped_price = 0
+        missing = 0
+
+        for sym in symbols:
+            data = quotes.get(sym)
+            price = quote_filter_price(data) if data else None
+            if settings.max_price_enabled:
+                if price is None:
+                    missing += 1
+                    logger.info("%s — no price; excluded by the price filter", sym)
+                    continue
+                if price >= settings.max_stock_price:
+                    dropped_price += 1
+                    continue
+            db.insert_watchlist(today, sym, price or 0.0)
+            kept.append(sym)
+
+        if settings.max_price_enabled:
+            logger.info(
+                "%d of %d tracked symbols under ₹%.0f today (%s); %d at/above the cap, %d missing a price",
+                len(kept), len(symbols), settings.max_stock_price, today, dropped_price, missing,
+            )
+        else:
+            logger.info("Tracking %d symbols today (%s). Price filter is off.", len(kept), today)
+        return sorted(kept)
 
     def get_todays_watchlist(self) -> list[str]:
         """
@@ -52,5 +75,5 @@ class WatchlistManager:
             logger.info("Loaded %d symbols from cached watchlist for %s", len(symbols), today)
             return symbols
 
-        logger.warning("No watchlist found for %s — rebuilding from API.", today)
+        logger.warning("No watchlist found for %s — rebuilding from the tracking list.", today)
         return self.build_daily_watchlist()

@@ -20,7 +20,7 @@ _DB_PATH.parent.mkdir(exist_ok=True)
 @contextmanager
 def _conn():
     """Yield a thread-safe SQLite connection with WAL mode enabled."""
-    con = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+    con = sqlite3.connect(str(_DB_PATH), check_same_thread=False, timeout=30)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA foreign_keys=ON")
@@ -93,6 +93,28 @@ _DDL = [
         risk_pct      REAL NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS strategy_settings (
+        id                           INTEGER PRIMARY KEY CHECK (id = 1),
+        symbols_json                 TEXT    NOT NULL,
+        max_price_enabled            INTEGER NOT NULL,
+        max_stock_price              REAL    NOT NULL,
+        orb_range_threshold          REAL    NOT NULL,
+        orb_duration_minutes         INTEGER NOT NULL,
+        breakout_timeframe_minutes   INTEGER NOT NULL,
+        updated_at                   TEXT    NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dashboard_commands (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        action      TEXT    NOT NULL,
+        status      TEXT    NOT NULL,
+        detail      TEXT    NOT NULL DEFAULT '',
+        created_at  TEXT    NOT NULL,
+        finished_at TEXT
+    )
+    """,
 ]
 
 
@@ -112,6 +134,11 @@ def insert_watchlist(date: str, symbol: str, ltp: float) -> None:
             "INSERT OR REPLACE INTO daily_watchlist (date, symbol, ltp) VALUES (?,?,?)",
             (date, symbol, ltp),
         )
+
+
+def delete_watchlist(date: str) -> None:
+    with _conn() as con:
+        con.execute("DELETE FROM daily_watchlist WHERE date=?", (date,))
 
 
 def get_watchlist(date: str) -> list[str]:
@@ -137,6 +164,11 @@ def insert_orb_level(
         )
 
 
+def delete_orb_levels(date: str) -> None:
+    with _conn() as con:
+        con.execute("DELETE FROM orb_levels WHERE date=?", (date,))
+
+
 def get_orb_levels(date: str) -> dict[str, dict]:
     """Return {symbol: {orb_high, orb_low}} for passed symbols on date."""
     with _conn() as con:
@@ -145,6 +177,17 @@ def get_orb_levels(date: str) -> dict[str, dict]:
             (date,),
         ).fetchall()
     return {r["symbol"]: {"orb_high": r["orb_high"], "orb_low": r["orb_low"]} for r in rows}
+
+
+def get_orb_level_rows(date: str) -> list[dict]:
+    """Return every ORB row for a date, including symbols that failed the filter."""
+    with _conn() as con:
+        rows = con.execute(
+            """SELECT symbol, orb_high, orb_low, range_pct, passed_filter
+               FROM orb_levels WHERE date=? ORDER BY symbol""",
+            (date,),
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 # ── signals ───────────────────────────────────────────────────────────────────
@@ -182,6 +225,12 @@ def has_signal_fired(date: str, symbol: str, signal_type: str) -> bool:
 def mark_signal_alerted(signal_id: int) -> None:
     with _conn() as con:
         con.execute("UPDATE signals SET alerted=1 WHERE id=?", (signal_id,))
+
+
+def delete_signals(date: str) -> None:
+    """Remove every signal for a date so a recalculation can send them again."""
+    with _conn() as con:
+        con.execute("DELETE FROM signals WHERE date=?", (date,))
 
 
 def get_signals(date: str) -> list[dict]:
@@ -231,6 +280,94 @@ def save_daily_capital(
                VALUES (?,?,?,?,?)""",
             (date, capital, margin, buying_power, risk_pct),
         )
+
+
+def get_strategy_settings() -> dict | None:
+    with _conn() as con:
+        row = con.execute("SELECT * FROM strategy_settings WHERE id=1").fetchone()
+    return dict(row) if row else None
+
+
+def save_strategy_settings(
+    symbols_json: str,
+    max_price_enabled: int,
+    max_stock_price: float,
+    orb_range_threshold: float,
+    orb_duration_minutes: int,
+    breakout_timeframe_minutes: int,
+    updated_at: str,
+) -> None:
+    with _conn() as con:
+        con.execute(
+            """INSERT INTO strategy_settings (
+                   id, symbols_json, max_price_enabled, max_stock_price,
+                   orb_range_threshold, orb_duration_minutes,
+                   breakout_timeframe_minutes, updated_at
+               ) VALUES (1,?,?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET
+                   symbols_json=excluded.symbols_json,
+                   max_price_enabled=excluded.max_price_enabled,
+                   max_stock_price=excluded.max_stock_price,
+                   orb_range_threshold=excluded.orb_range_threshold,
+                   orb_duration_minutes=excluded.orb_duration_minutes,
+                   breakout_timeframe_minutes=excluded.breakout_timeframe_minutes,
+                   updated_at=excluded.updated_at""",
+            (
+                symbols_json,
+                max_price_enabled,
+                max_stock_price,
+                orb_range_threshold,
+                orb_duration_minutes,
+                breakout_timeframe_minutes,
+                updated_at,
+            ),
+        )
+
+
+def enqueue_command(action: str, created_at: str) -> int:
+    with _conn() as con:
+        cur = con.execute(
+            """INSERT INTO dashboard_commands (action, status, detail, created_at)
+               VALUES (?, 'pending', '', ?)""",
+            (action, created_at),
+        )
+        return int(cur.lastrowid)
+
+
+def claim_next_command() -> dict | None:
+    """Mark the oldest pending command as running and return it."""
+    with _conn() as con:
+        row = con.execute(
+            """SELECT * FROM dashboard_commands
+               WHERE status='pending' ORDER BY id LIMIT 1"""
+        ).fetchone()
+        if row is None:
+            return None
+        cur = con.execute(
+            """UPDATE dashboard_commands SET status='running'
+               WHERE id=? AND status='pending'""",
+            (row["id"],),
+        )
+        if cur.rowcount != 1:
+            return None
+        return dict(row)
+
+
+def finish_command(command_id: int, status: str, detail: str, finished_at: str) -> None:
+    with _conn() as con:
+        con.execute(
+            """UPDATE dashboard_commands
+               SET status=?, detail=?, finished_at=? WHERE id=?""",
+            (status, detail, finished_at, command_id),
+        )
+
+
+def latest_command() -> dict | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM dashboard_commands ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def get_daily_capital(date: str) -> dict | None:

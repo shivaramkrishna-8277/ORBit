@@ -4,7 +4,6 @@ from datetime import datetime
 import pytz
 
 from src import config
-from src.broker import fyers_client
 from src.strategy.candle_builder import CandleBuilder
 from src.utils import db
 from src.utils.logger import get_logger
@@ -17,7 +16,7 @@ IST = pytz.timezone("Asia/Kolkata")
 
 class ORBCalculator:
 
-    def calculate_orb(self, symbol: str, first_candle: dict) -> dict | None:
+    def calculate_orb(self, symbol: str, first_candle: dict, settings=None) -> dict | None:
         """
         Evaluate the **first 15-minute candle (9:15–9:30 IST)** and decide whether
         the stock qualifies.
@@ -37,11 +36,15 @@ class ORBCalculator:
         orb_low = first_candle["low"]
         open_price = first_candle.get("open", 0.0)
 
-        if open_price >= config.MAX_STOCK_PRICE:
+        price_filter_on = settings.max_price_enabled if settings is not None else True
+        max_price = settings.max_stock_price if settings is not None else config.MAX_STOCK_PRICE
+        threshold = settings.orb_range_threshold if settings is not None else config.ORB_RANGE_THRESHOLD
+
+        if price_filter_on and open_price >= max_price:
             db.insert_orb_level(today, symbol, orb_high, orb_low, 0.0, passed=0)
             logger.info(
                 "%s DROPPED — open ₹%.2f exceeds ₹%.0f price limit",
-                symbol, open_price, config.MAX_STOCK_PRICE,
+                symbol, open_price, max_price,
             )
             return None
 
@@ -51,7 +54,7 @@ class ORBCalculator:
 
         range_pct = orb_range_pct(orb_high, orb_low)
 
-        if range_pct <= config.ORB_RANGE_THRESHOLD:
+        if range_pct <= threshold:
             db.insert_orb_level(today, symbol, orb_high, orb_low, range_pct, passed=1)
             logger.info(
                 "%s PASSED ORB filter — first 15-min range %.2f%% (H=%.2f L=%.2f)",
@@ -62,7 +65,7 @@ class ORBCalculator:
             db.insert_orb_level(today, symbol, orb_high, orb_low, range_pct, passed=0)
             logger.info(
                 "%s DROPPED — first 15-min range %.2f%% exceeds %.1f%% threshold",
-                symbol, range_pct, config.ORB_RANGE_THRESHOLD,
+                symbol, range_pct, threshold,
             )
             return None
 
@@ -71,6 +74,7 @@ class ORBCalculator:
         candle_builder: CandleBuilder,
         watchlist: list[str],
         client=None,
+        settings=None,
     ) -> dict[str, dict]:
         """
         Run the ORB filter on the **9:15–9:30 first 15-minute candle** for each symbol.
@@ -92,6 +96,7 @@ class ORBCalculator:
             first_candle = None
 
             if client is not None:
+                from src.broker import fyers_client
                 first_candle = fyers_client.get_opening_range_candle(
                     client, symbol, today
                 )
@@ -120,7 +125,7 @@ class ORBCalculator:
                 dropped += 1
                 continue
 
-            result = self.calculate_orb(symbol, first_candle)
+            result = self.calculate_orb(symbol, first_candle, settings=settings)
             if result:
                 passed[symbol] = {"orb_high": result["orb_high"], "orb_low": result["orb_low"]}
             else:
