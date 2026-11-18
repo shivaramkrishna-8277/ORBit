@@ -61,7 +61,7 @@ services:
       - ../data:/app/data
       - ../logs:/app/logs
     ports:
-      - "127.0.0.1:8501:8501"
+      - "127.0.0.1:8601:8501"
     logging:
       driver: json-file
       options:
