@@ -27,7 +27,22 @@ class BacktestRequest:
     rrr: float
 
 
-def run_backtest(client, request: BacktestRequest, progress=None) -> dict:
+def score_trades(trades: list[dict]) -> dict:
+    """Win rate and average R use target and stop exits only. Session close is excluded."""
+    resolved = [row for row in trades if row.get("exit_reason") in ("target", "stop")]
+    wins = sum(1 for row in resolved if row["exit_reason"] == "target")
+    losses = sum(1 for row in resolved if row["exit_reason"] == "stop")
+    session_closes = sum(1 for row in trades if row.get("exit_reason") == "session close")
+    return {
+        "wins": wins,
+        "losses": losses,
+        "session_closes": session_closes,
+        "win_rate": (wins / len(resolved) * 100) if resolved else 0.0,
+        "avg_r": (sum(row["r_multiple"] for row in resolved) / len(resolved)) if resolved else 0.0,
+    }
+
+
+def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=None) -> dict:
     """Fetch 1-minute history, simulate each session, and return a report dict."""
     if request.date_to < request.date_from:
         raise ValueError("End date is before the start date.")
@@ -45,9 +60,14 @@ def run_backtest(client, request: BacktestRequest, progress=None) -> dict:
     if not days:
         raise ValueError("No NSE sessions in that date range.")
 
-    bars = load_watchlist_minutes(
-        client, request.symbols, request.date_from, request.date_to, progress=progress
-    )
+    if minute_bars is None:
+        bars = load_watchlist_minutes(
+            client, request.symbols, request.date_from, request.date_to, progress=progress
+        )
+    else:
+        bars = minute_bars
+        if progress:
+            progress("Using cached history for this date range.")
 
     equity = request.capital
     peak = equity
@@ -111,21 +131,21 @@ def run_backtest(client, request: BacktestRequest, progress=None) -> dict:
         peak = max(peak, equity)
         max_drawdown = max(max_drawdown, peak - equity)
 
-    wins = [row for row in trades if row["pnl"] > 0]
-    losses = [row for row in trades if row["pnl"] < 0]
+    scored = score_trades(trades)
     gross = equity - request.capital
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "sessions": len(days),
         "symbols": len(request.symbols),
         "trades": len(trades),
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": (len(wins) / len(trades) * 100) if trades else 0.0,
+        "wins": scored["wins"],
+        "losses": scored["losses"],
+        "session_closes": scored["session_closes"],
+        "win_rate": scored["win_rate"],
         "gross_pnl": gross,
         "ending_equity": equity,
         "max_drawdown": max_drawdown,
-        "avg_r": (sum(row["r_multiple"] for row in trades) / len(trades)) if trades else 0.0,
+        "avg_r": scored["avg_r"],
         "trade_rows": trades,
         "skip_rows": skipped,
         "daily_rows": daily,

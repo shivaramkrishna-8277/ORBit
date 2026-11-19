@@ -118,29 +118,44 @@ def get_historical_candles(
         DataFrame with columns: datetime (IST-aware), open, high, low, close, volume
         Empty DataFrame on error.
     """
+    frame, ok = fetch_historical_candles(client, symbol, resolution, date_from, date_to)
+    if not ok:
+        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+    return frame
+
+
+def fetch_historical_candles(
+    client: FyersModel,
+    symbol: str,
+    resolution: str,
+    date_from: str,
+    date_to: str,
+) -> tuple[pd.DataFrame, bool]:
+    """Same candles as get_historical_candles, plus whether Fyers accepted the request."""
     payload = {
-        "symbol":     symbol,
+        "symbol": symbol,
         "resolution": resolution,
         "date_format": "1",
         "range_from": date_from,
-        "range_to":   date_to,
-        "cont_flag":  "1",
+        "range_to": date_to,
+        "cont_flag": "1",
     }
     response = _call_with_retry(client.history, payload)
+    empty = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+    if not isinstance(response, dict) or response.get("s") != "ok":
+        message = response.get("message", response) if isinstance(response, dict) else response
+        logger.warning("history() failed for %s: %s", symbol, message)
+        return empty, False
 
-    if response.get("s") != "ok":
-        logger.warning("history() failed for %s: %s", symbol, response.get("message", response))
-        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
-
-    candles = response.get("candles", [])
+    candles = response.get("candles") or []
     if not candles:
-        return pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+        return empty, True
 
     df = pd.DataFrame(candles, columns=["epoch", "open", "high", "low", "close", "volume"])
     df["datetime"] = pd.to_datetime(df["epoch"], unit="s", utc=True).dt.tz_convert(IST)
     df.drop(columns=["epoch"], inplace=True)
     df = df[["datetime", "open", "high", "low", "close", "volume"]]
-    return df.reset_index(drop=True)
+    return df.reset_index(drop=True), True
 
 
 def get_opening_range_candle(

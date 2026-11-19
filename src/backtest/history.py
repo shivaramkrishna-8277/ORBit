@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 import pytz
@@ -35,7 +35,42 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fetch_log (
+            symbol TEXT NOT NULL,
+            day    TEXT NOT NULL,
+            PRIMARY KEY (symbol, day)
+        )
+        """
+    )
+    con.execute(
+        """
+        INSERT OR IGNORE INTO fetch_log (symbol, day)
+        SELECT symbol, substr(ts, 1, 10)
+        FROM minute_bars
+        WHERE substr(ts, 12, 2) BETWEEN '09' AND '15'
+        GROUP BY symbol, substr(ts, 1, 10)
+        """
+    )
     return con
+
+
+def missing_spans(days: list[date], covered: set[str], *, refresh: date | None = None) -> list[tuple[date, date]]:
+    """Group days that still need a download. Weekends stay inside one request."""
+    missing = [day for day in days if day.isoformat() not in covered or day == refresh]
+    if not missing:
+        return []
+    missing.sort()
+    spans: list[tuple[date, date]] = []
+    start = prev = missing[0]
+    for day in missing[1:]:
+        if (day - prev).days > 4 or (day - start).days >= _CHUNK_DAYS - 1:
+            spans.append((start, prev))
+            start = day
+        prev = day
+    spans.append((start, prev))
+    return spans
 
 
 def _stamp(ts: datetime) -> str:
@@ -50,25 +85,19 @@ def _parse(stamp: str) -> datetime:
     return IST.localize(datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S"))
 
 
-def _chunks(start: date, end: date):
-    cursor = start
-    while cursor <= end:
-        stop = min(end, cursor + timedelta(days=_CHUNK_DAYS - 1))
-        yield cursor, stop
-        cursor = stop + timedelta(days=1)
+def _covered_days(con: sqlite3.Connection, symbol: str, start: date, end: date) -> set[str]:
+    rows = con.execute(
+        "SELECT day FROM fetch_log WHERE symbol=? AND day>=? AND day<=?",
+        (symbol, start.isoformat(), end.isoformat()),
+    ).fetchall()
+    return {row[0] for row in rows}
 
 
-def _missing_days(con: sqlite3.Connection, symbol: str, days: list[date]) -> list[date]:
-    missing: list[date] = []
-    for day in days:
-        open_ts = f"{day.isoformat()} 09:15:00"
-        row = con.execute(
-            "SELECT 1 FROM minute_bars WHERE symbol=? AND ts=? LIMIT 1",
-            (symbol, open_ts),
-        ).fetchone()
-        if row is None:
-            missing.append(day)
-    return missing
+def _mark_fetched(con: sqlite3.Connection, symbol: str, start: date, end: date) -> None:
+    con.executemany(
+        "INSERT OR IGNORE INTO fetch_log (symbol, day) VALUES (?, ?)",
+        [(symbol, day.isoformat()) for day in trading_days(start, end)],
+    )
 
 
 def _store_frame(con: sqlite3.Connection, symbol: str, frame) -> None:
@@ -104,23 +133,28 @@ def load_watchlist_minutes(client, symbols: list[str], start: date, end: date, p
     con = _connect()
     try:
         for index, symbol in enumerate(symbols, start=1):
+            today = datetime.now(IST).date()
+            refresh = today if start <= today <= end else None
+            spans = missing_spans(days, _covered_days(con, symbol, start, end), refresh=refresh)
             if progress:
-                progress(f"History {index}/{len(symbols)} · {symbol}")
-            missing = _missing_days(con, symbol, days)
-            if missing:
-                for chunk_from, chunk_to in _chunks(missing[0], missing[-1]):
-                    if not any(chunk_from <= day <= chunk_to for day in missing):
-                        continue
-                    from src.broker.fyers_client import get_historical_candles
+                state = "download" if spans else "cache"
+                progress(f"History {index}/{len(symbols)} · {symbol} · {state}")
+            if spans:
+                from src.broker.fyers_client import fetch_historical_candles
 
-                    frame = get_historical_candles(
+                for chunk_from, chunk_to in spans:
+                    frame, ok = fetch_historical_candles(
                         client,
                         symbol,
                         "1",
                         chunk_from.isoformat(),
                         chunk_to.isoformat(),
                     )
+                    if not ok:
+                        logger.warning("Backtest history left uncached for %s %s–%s", symbol, chunk_from, chunk_to)
+                        continue
                     _store_frame(con, symbol, frame)
+                    _mark_fetched(con, symbol, chunk_from, chunk_to)
                     con.commit()
                     time.sleep(0.25)
             rows = con.execute(

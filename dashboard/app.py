@@ -558,8 +558,29 @@ with tab_backtest:
                     def _progress(message: str) -> None:
                         note.write(message)
 
+                    from src.backtest.history import load_watchlist_minutes
+
                     token = get_access_token(allow_oauth=False)
-                    report = run_backtest(get_client(token), request, progress=_progress)
+                    client = get_client(token)
+                    hist_key = (
+                        tuple(request.symbols),
+                        request.date_from.isoformat(),
+                        request.date_to.isoformat(),
+                    )
+                    bars = None
+                    if st.session_state.get("bt_hist_key") == hist_key:
+                        bars = st.session_state.get("bt_hist_bars")
+                    if bars is None:
+                        bars = load_watchlist_minutes(
+                            client,
+                            request.symbols,
+                            request.date_from,
+                            request.date_to,
+                            progress=_progress,
+                        )
+                        st.session_state.bt_hist_bars = bars
+                        st.session_state.bt_hist_key = hist_key
+                    report = run_backtest(client, request, progress=_progress, minute_bars=bars)
                     st.session_state.backtest_report = report
                     status.update(label="Backtest finished", state="complete")
             except Exception as exc:
@@ -577,7 +598,11 @@ with tab_backtest:
         c1.metric("Ending equity", f"₹{report['ending_equity']:,.0f}")
         c2.metric("Average R", f"{report['avg_r']:.2f}")
         c3.metric("Sessions", report["sessions"])
-        st.caption(f"{report['wins']} wins · {report['losses']} losses · {report['symbols']} symbols")
+        st.caption(
+            f"{report['wins']} targets · {report['losses']} stops · "
+            f"{report.get('session_closes', 0)} session closes excluded from win rate and average R · "
+            f"{report['symbols']} symbols"
+        )
 
         trades_tab, days_tab, skips_tab = st.tabs(["Trades", "Days", "Skipped"])
         with trades_tab:

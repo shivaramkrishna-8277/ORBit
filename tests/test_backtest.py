@@ -80,6 +80,34 @@ def _run(bars_by_symbol, **overrides):
     return simulate_day(DAY, bars_by_symbol, **params)
 
 
+def test_session_close_is_excluded_from_win_rate():
+    from src.backtest.engine import score_trades
+
+    scored = score_trades(
+        [
+            {"exit_reason": "target", "r_multiple": 2.0, "pnl": 10},
+            {"exit_reason": "stop", "r_multiple": -1.0, "pnl": -5},
+            {"exit_reason": "session close", "r_multiple": 0.4, "pnl": 4},
+        ]
+    )
+    assert scored["win_rate"] == 50
+    assert scored["wins"] == 1
+    assert scored["losses"] == 1
+    assert scored["session_closes"] == 1
+    assert scored["avg_r"] == 0.5
+
+
+def test_cached_days_are_not_downloaded_again():
+    from src.backtest.history import missing_spans
+
+    days = [date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7)]
+    covered = {day.isoformat() for day in days}
+    assert missing_spans(days, covered) == []
+    assert missing_spans(days, {days[0].isoformat(), days[2].isoformat()}) == [
+        (days[1], days[1])
+    ]
+
+
 def test_volume_interest_uses_every_prior_breakout_candle():
     interested, ratio = volume_interest(300, [100, 100, 100, 100])
     assert interested is True
