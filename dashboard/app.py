@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
 
 import pytz
 import streamlit as st
+import streamlit.components.v1 as components
 
 from src.broker.auth import is_token_valid
 from src.broker.symbol_search import load_master, resolve_nse_equity, search_nse_equity
@@ -94,6 +95,118 @@ def _persist_watchlist() -> None:
     update_watchlist(list(st.session_state.symbols))
 
 
+def _focus_search_input() -> None:
+    """Best-effort: focus the modal search box and select its text (Streamlit has no native API)."""
+    components.html(
+        """
+        <script>
+        const doc = window.parent.document;
+        setTimeout(() => {
+          const nodes = doc.querySelectorAll('div[data-testid="stDialog"] input[type="text"]');
+          const el = nodes.length ? nodes[nodes.length - 1] : null;
+          if (el) {
+            el.focus();
+            el.select();
+          }
+        }, 120);
+        </script>
+        """,
+        height=0,
+    )
+
+
+@st.dialog("Add symbols")
+def _add_symbols_dialog() -> None:
+    st.caption("Type a ticker or company name, pick a match, repeat. Saves when you click **Add to watchlist**.")
+    if "modal_staging" not in st.session_state:
+        st.session_state.modal_staging = []
+    if "modal_input_nonce" not in st.session_state:
+        st.session_state.modal_input_nonce = 0
+
+    if st.session_state.pop("modal_focus_search", False):
+        _focus_search_input()
+
+    query = st.text_input(
+        "Search",
+        key=f"modal_search_{st.session_state.modal_input_nonce}",
+        placeholder="e.g. TCS, reliance, sbi",
+        label_visibility="collapsed",
+    ).strip()
+
+    hits: list[dict] = []
+    if len(query) >= 2:
+        master = _ensure_sym_master()
+        if master is not None:
+            hits = search_nse_equity(query, master=master, limit=25)
+
+    labels = {
+        h["symbol"]: f"{h['ticker']} — {h['name']}" if h.get("name") else h["symbol"]
+        for h in hits
+    }
+
+    def _on_pick() -> None:
+        sym = st.session_state.modal_match_pick
+        if not sym or sym == "":
+            return
+        on_list = sym in st.session_state.symbols or sym in st.session_state.modal_staging
+        if not on_list:
+            st.session_state.modal_staging.append(sym)
+        st.session_state.modal_input_nonce += 1
+        st.session_state.modal_match_pick = ""
+        st.session_state.modal_focus_search = True
+
+    pick_options = [""] + [h["symbol"] for h in hits]
+    st.selectbox(
+        "Matches",
+        options=pick_options,
+        format_func=lambda s: "Pick a symbol…" if not s else labels.get(s, s),
+        key="modal_match_pick",
+        on_change=_on_pick,
+        label_visibility="visible",
+    )
+
+    if len(query) >= 2 and not hits:
+        st.caption("No NSE EQ matches.")
+
+    if st.session_state.modal_staging:
+        shown = ", ".join(_ticker(s) for s in st.session_state.modal_staging)
+        st.info(f"Queued: {shown}")
+
+    with st.expander("Paste many tickers"):
+        bulk = st.text_area(
+            "One per line or spaces / commas",
+            height=80,
+            placeholder="RELIANCE TCS INFY",
+            label_visibility="collapsed",
+        )
+        if st.button("Queue pasted tickers", disabled=not bulk.strip()):
+            master = _ensure_sym_master()
+            resolved, errors = _resolve_many(_parse_symbol_list(bulk), master)
+            for sym in resolved:
+                if sym not in st.session_state.modal_staging and sym not in st.session_state.symbols:
+                    st.session_state.modal_staging.append(sym)
+            if errors:
+                st.warning("Skipped: " + "; ".join(errors[:4]))
+
+    bar1, bar2, bar3 = st.columns(3)
+    with bar1:
+        if st.button("Add to watchlist", type="primary", disabled=not st.session_state.modal_staging):
+            _add_symbols_bulk(st.session_state.modal_staging)
+            _persist_watchlist()
+            st.session_state.modal_staging = []
+            st.rerun()
+    with bar2:
+        if st.button("Add Nifty 50"):
+            for sym in NIFTY50_SYMBOLS:
+                if sym not in st.session_state.modal_staging and sym not in st.session_state.symbols:
+                    st.session_state.modal_staging.append(sym)
+            st.rerun()
+    with bar3:
+        if st.button("Close"):
+            st.session_state.modal_staging = []
+            st.rerun()
+
+
 def _command_line(command: dict | None) -> str:
     if command is None:
         return "—"
@@ -112,10 +225,8 @@ if "symbols" not in st.session_state:
     _load_symbols(settings)
 if "sym_master" not in st.session_state:
     st.session_state.sym_master = None
-if "sym_search_hits" not in st.session_state:
-    st.session_state.sym_search_hits = []
-if "sym_search_for" not in st.session_state:
-    st.session_state.sym_search_for = ""
+if "modal_input_nonce" not in st.session_state:
+    st.session_state.modal_input_nonce = 0
 
 today = datetime.now(IST).strftime("%Y-%m-%d")
 token_ok = is_token_valid()
@@ -136,78 +247,18 @@ tab_list, tab_rules, tab_day = st.tabs(["Watchlist", "Strategy", "Today"])
 # ── Watchlist ──────────────────────────────────────────────────────────────────
 
 with tab_list:
-    st.caption("Watchlist changes are saved to disk immediately. Use **Strategy** tab for ORB rules.")
+    st.caption("Watchlist is saved to disk when you add from the modal. ORB rules: **Strategy** tab.")
 
-    query = st.text_input(
-        "Search",
-        key="symbol_search_query",
-        placeholder="Ticker or company name (e.g. TCS, reliance, bank)",
-        label_visibility="collapsed",
-    ).strip()
-
-    if len(query) >= 2 and query != st.session_state.sym_search_for:
-        master = _ensure_sym_master()
-        if master is not None:
-            st.session_state.sym_search_hits = search_nse_equity(query, master=master, limit=30)
-            st.session_state.sym_search_for = query
-    elif len(query) < 2:
-        st.session_state.sym_search_hits = []
-        st.session_state.sym_search_for = ""
-
-    hits = st.session_state.sym_search_hits
-    if len(query) >= 2 and hits:
-        labels = {
-            h["symbol"]: f"{h['ticker']} — {h['name']}" if h.get("name") else h["symbol"]
-            for h in hits
-        }
-        addable = [s for s in labels if s not in st.session_state.symbols]
-        picked = st.multiselect(
-            "Search results",
-            options=addable,
-            format_func=lambda sym: labels[sym],
-            placeholder="Pick symbols to add",
-            label_visibility="visible",
-        )
-        b1, b2, b3 = st.columns([2, 2, 3])
-        with b1:
-            if st.button("Add picked", type="primary", disabled=not picked, use_container_width=True):
-                _add_symbols_bulk(picked)
-                _persist_watchlist()
-                st.rerun()
-        with b2:
-            if st.button(
-                f"Add all ({len(addable)})",
-                disabled=not addable,
-                use_container_width=True,
-            ):
-                _add_symbols_bulk(addable)
-                _persist_watchlist()
-                st.rerun()
-        with b3:
-            with st.popover("More ways to add"):
-                if st.button("Add full Nifty 50", use_container_width=True):
-                    st.session_state.symbols = sorted(set(st.session_state.symbols) | set(NIFTY50_SYMBOLS))
-                    _persist_watchlist()
-                    st.rerun()
-                if st.button("Reload watchlist from disk", use_container_width=True):
-                    _load_symbols(load_settings())
-                    st.rerun()
-                bulk = st.text_area(
-                    "Paste tickers",
-                    height=100,
-                    placeholder="RELIANCE, TCS INFY or one per line",
-                )
-                if st.button("Add pasted tickers", disabled=not bulk.strip(), use_container_width=True):
-                    master = _ensure_sym_master()
-                    resolved, errors = _resolve_many(_parse_symbol_list(bulk), master)
-                    added = _add_symbols_bulk(resolved)
-                    if errors:
-                        st.warning("Some lines skipped: " + "; ".join(errors[:5]))
-                    if added:
-                        _persist_watchlist()
-                        st.rerun()
-    elif len(query) >= 2:
-        st.caption("No matches.")
+    head_l, head_r = st.columns([2, 3])
+    with head_l:
+        if st.button("Add symbols", type="primary", use_container_width=True):
+            st.session_state.modal_staging = []
+            st.session_state.modal_input_nonce += 1
+            _add_symbols_dialog()
+    with head_r:
+        if st.button("Reload watchlist from disk", use_container_width=True):
+            _load_symbols(load_settings())
+            st.rerun()
 
     st.divider()
     st.subheader(f"On your list ({len(st.session_state.symbols)})")
