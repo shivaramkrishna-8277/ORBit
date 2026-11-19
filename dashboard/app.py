@@ -124,12 +124,15 @@ def _queue_symbol(sym: str) -> None:
     if sym in st.session_state.symbols or sym in st.session_state.modal_staging:
         return
     st.session_state.modal_staging.append(sym)
-    st.session_state.modal_live_search = ""
+    st.session_state.clear_modal_search = True
     st.session_state.modal_focus_search = True
 
 
 @st.fragment
 def _symbol_add_panel() -> None:
+    if st.session_state.pop("clear_modal_search", False):
+        st.session_state.modal_live_search = ""
+
     if st.session_state.pop("modal_focus_search", False):
         _focus_ticker_search()
 
@@ -137,8 +140,10 @@ def _symbol_add_panel() -> None:
     st.text_input(
         "Ticker search",
         key="modal_live_search",
-        placeholder="Type ticker or company — results update as you type",
+        placeholder="e.g. kotak, tcs, hdfc",
         label_visibility="collapsed",
+        type="search",
+        live=True,
     )
     query = (st.session_state.get("modal_live_search") or "").strip()
 
@@ -146,13 +151,14 @@ def _symbol_add_panel() -> None:
     if len(query) >= 2:
         master = _ensure_sym_master()
         if master is not None:
-            hits = search_nse_equity(query, master=master, limit=30)
+            hits = search_nse_equity(query, master=master, limit=40)
 
     if hits:
         head = st.columns([1, 4])
         head[0].markdown("**Ticker**")
         head[1].markdown("**Company**")
-        with st.container(height=min(300, 44 * len(hits))):
+        list_height = max(480, min(720, 52 * len(hits)))
+        with st.container(height=list_height):
             for h in hits:
                 sym = h["symbol"]
                 on_watch = sym in st.session_state.symbols
@@ -172,7 +178,7 @@ def _symbol_add_panel() -> None:
                     use_container_width=True,
                 ):
                     _queue_symbol(sym)
-                    st.rerun(scope="fragment")
+                    st.rerun()
     elif len(query) >= 2:
         st.caption("No NSE EQ matches.")
 
@@ -213,7 +219,7 @@ def _symbol_add_panel() -> None:
             for sym in NIFTY50_SYMBOLS:
                 if sym not in st.session_state.modal_staging and sym not in st.session_state.symbols:
                     st.session_state.modal_staging.append(sym)
-            st.rerun(scope="fragment")
+            st.rerun()
     with b3:
         if st.button("Cancel", key="cancel_add"):
             st.session_state.modal_staging = []
@@ -285,12 +291,13 @@ with tab_list:
             t1, t2 = st.columns([8, 1])
             with t1:
                 st.subheader("Add symbols")
-                st.caption("Results refresh on every keystroke — click a row, then keep typing the next name.")
+                st.caption("Type in the box — results update as you type. Click a row to queue it.")
             with t2:
                 if st.button("✕", key="close_add_panel"):
                     st.session_state.add_symbols_open = False
                     st.session_state.modal_staging = []
                     st.rerun()
+
             _symbol_add_panel()
 
     st.divider()
