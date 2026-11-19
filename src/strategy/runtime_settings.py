@@ -11,9 +11,14 @@ from datetime import datetime, timedelta
 
 import pytz
 
+from src.config import CONFIG_DIR
 from src.utils import db
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 IST = pytz.timezone("Asia/Kolkata")
+_SETTINGS_JSON = CONFIG_DIR / "strategy_settings.json"
 
 ORB_DURATIONS = (5, 15, 30)
 BREAKOUT_TIMEFRAMES = (1, 5, 15, 30)
@@ -92,14 +97,7 @@ def default_settings() -> StrategySettings:
     )
 
 
-def load_settings() -> StrategySettings:
-    db.init_db()
-    row = db.get_strategy_settings()
-    if row is None:
-        settings = default_settings()
-        save_settings(settings)
-        return load_settings()
-
+def _settings_from_row(row: dict) -> StrategySettings:
     return StrategySettings(
         symbols=json.loads(row["symbols_json"]),
         max_price_enabled=bool(row["max_price_enabled"]),
@@ -109,6 +107,62 @@ def load_settings() -> StrategySettings:
         breakout_timeframe_minutes=int(row["breakout_timeframe_minutes"]),
         updated_at=row["updated_at"],
     )
+
+
+def _settings_to_dict(settings: StrategySettings) -> dict:
+    return {
+        "symbols": settings.symbols,
+        "max_price_enabled": settings.max_price_enabled,
+        "max_stock_price": settings.max_stock_price,
+        "orb_range_threshold": settings.orb_range_threshold,
+        "orb_duration_minutes": settings.orb_duration_minutes,
+        "breakout_timeframe_minutes": settings.breakout_timeframe_minutes,
+        "updated_at": settings.updated_at,
+    }
+
+
+def _write_json_backup(settings: StrategySettings) -> None:
+    """Mirror settings on the mounted config volume (survives SQLite issues / redeploys)."""
+    CONFIG_DIR.mkdir(exist_ok=True)
+    payload = _settings_to_dict(settings)
+    tmp = _SETTINGS_JSON.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(_SETTINGS_JSON)
+
+
+def _read_json_backup() -> StrategySettings | None:
+    if not _SETTINGS_JSON.is_file():
+        return None
+    try:
+        data = json.loads(_SETTINGS_JSON.read_text(encoding="utf-8"))
+        return StrategySettings(
+            symbols=list(data["symbols"]),
+            max_price_enabled=bool(data["max_price_enabled"]),
+            max_stock_price=float(data["max_stock_price"]),
+            orb_range_threshold=float(data["orb_range_threshold"]),
+            orb_duration_minutes=int(data["orb_duration_minutes"]),
+            breakout_timeframe_minutes=int(data["breakout_timeframe_minutes"]),
+            updated_at=str(data.get("updated_at", "")),
+        )
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        logger.warning("Could not read %s: %s", _SETTINGS_JSON, exc)
+        return None
+
+
+def load_settings() -> StrategySettings:
+    db.init_db()
+    row = db.get_strategy_settings()
+    if row is not None:
+        return _settings_from_row(row)
+
+    backup = _read_json_backup()
+    if backup is not None:
+        logger.info("Restored strategy settings from %s", _SETTINGS_JSON)
+        return save_settings(backup)
+
+    settings = default_settings()
+    logger.info("No saved strategy found — seeding Nifty 50 defaults.")
+    return save_settings(settings)
 
 
 def save_settings(settings: StrategySettings) -> StrategySettings:
@@ -124,7 +178,15 @@ def save_settings(settings: StrategySettings) -> StrategySettings:
         breakout_timeframe_minutes=int(settings.breakout_timeframe_minutes),
         updated_at=settings.updated_at,
     )
+    _write_json_backup(settings)
     return settings
+
+
+def update_watchlist(symbols: list[str]) -> StrategySettings:
+    """Persist symbol list without touching ORB rule fields."""
+    current = load_settings()
+    current.symbols = list(symbols)
+    return save_settings(current)
 
 
 def enqueue_recalc() -> int:

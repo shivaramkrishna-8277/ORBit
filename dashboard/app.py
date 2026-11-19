@@ -22,6 +22,7 @@ from src.strategy.runtime_settings import (
     load_settings,
     normalize_symbol,
     save_settings,
+    update_watchlist,
 )
 from src.utils import db
 
@@ -89,6 +90,10 @@ def _add_symbols_bulk(symbols: list[str]) -> int:
     return added
 
 
+def _persist_watchlist() -> None:
+    update_watchlist(list(st.session_state.symbols))
+
+
 def _command_line(command: dict | None) -> str:
     if command is None:
         return "—"
@@ -131,7 +136,7 @@ tab_list, tab_rules, tab_day = st.tabs(["Watchlist", "Strategy", "Today"])
 # ── Watchlist ──────────────────────────────────────────────────────────────────
 
 with tab_list:
-    st.markdown("Search as you type, add several symbols, then **Save strategy** on the Strategy tab.")
+    st.caption("Watchlist changes are saved to disk immediately. Use **Strategy** tab for ORB rules.")
 
     query = st.text_input(
         "Search",
@@ -167,6 +172,7 @@ with tab_list:
         with b1:
             if st.button("Add picked", type="primary", disabled=not picked, use_container_width=True):
                 _add_symbols_bulk(picked)
+                _persist_watchlist()
                 st.rerun()
         with b2:
             if st.button(
@@ -175,13 +181,15 @@ with tab_list:
                 use_container_width=True,
             ):
                 _add_symbols_bulk(addable)
+                _persist_watchlist()
                 st.rerun()
         with b3:
             with st.popover("More ways to add"):
                 if st.button("Add full Nifty 50", use_container_width=True):
                     st.session_state.symbols = sorted(set(st.session_state.symbols) | set(NIFTY50_SYMBOLS))
+                    _persist_watchlist()
                     st.rerun()
-                if st.button("Discard unsaved edits — reload from disk", use_container_width=True):
+                if st.button("Reload watchlist from disk", use_container_width=True):
                     _load_symbols(load_settings())
                     st.rerun()
                 bulk = st.text_area(
@@ -196,6 +204,7 @@ with tab_list:
                     if errors:
                         st.warning("Some lines skipped: " + "; ".join(errors[:5]))
                     if added:
+                        _persist_watchlist()
                         st.rerun()
     elif len(query) >= 2:
         st.caption("No matches.")
@@ -218,6 +227,7 @@ with tab_list:
         )
         if st.button("Remove picked", disabled=not to_remove):
             st.session_state.symbols = [s for s in st.session_state.symbols if s not in to_remove]
+            _persist_watchlist()
             st.rerun()
     else:
         st.info("List is empty. Use search or **More ways to add** → Nifty 50.")

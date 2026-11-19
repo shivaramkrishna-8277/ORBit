@@ -18,9 +18,9 @@ services:
       - 1.1.1.1
 
     volumes:
-      - ../config:/app/config
-      - ../data:/app/data
-      - ../logs:/app/logs
+      - ${ORBIT_HOST_CONFIG:-../config}:/app/config
+      - ${ORBIT_HOST_DATA:-../data}:/app/data
+      - ${ORBIT_HOST_LOGS:-../logs}:/app/logs
 
     ports:
       - "127.0.0.1:8080:8080"
@@ -57,9 +57,9 @@ services:
       - 8.8.8.8
       - 1.1.1.1
     volumes:
-      - ../config:/app/config
-      - ../data:/app/data
-      - ../logs:/app/logs
+      - ${ORBIT_HOST_CONFIG:-../config}:/app/config
+      - ${ORBIT_HOST_DATA:-../data}:/app/data
+      - ${ORBIT_HOST_LOGS:-../logs}:/app/logs
     ports:
       - "127.0.0.1:8601:8501"
     logging:

@@ -35,6 +35,8 @@ jobs:
             --exclude='*.pyc' \
             --exclude='.pytest_cache' \
             --exclude='config/token.txt' \
+            --exclude='config/strategy_settings.json' \
+            --exclude='config/sym_master' \
             --exclude='data/*.db' \
             --exclude='logs/*.log' \
             -C "$GITHUB_WORKSPACE" .
@@ -88,6 +90,9 @@ jobs:
             mkdir -p /opt/orbit/config /opt/orbit/data /opt/orbit/logs
 
             echo "Building and starting ORBit..."
+            export ORBIT_HOST_CONFIG=/opt/orbit/config
+            export ORBIT_HOST_DATA=/opt/orbit/data
+            export ORBIT_HOST_LOGS=/opt/orbit/logs
             docker compose up -d --build --remove-orphans
 
             echo "Waiting for startup..."

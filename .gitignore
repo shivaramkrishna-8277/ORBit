@@ -17,6 +17,8 @@ build/
 
 # Project-sensitive files
 config/token.txt
+config/strategy_settings.json
+config/sym_master/
 data/*.db
 
 # Logs
