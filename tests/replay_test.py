@@ -75,8 +75,19 @@ class _InMemoryDB:
     def has_signal_fired(self, date, symbol, signal_type):
         return (date, symbol) in self._fired
 
-    def insert_signal(self, date, symbol, signal_type, candle_close,
-                      orb_level, move_pct, triggered_at):
+    def insert_signal(
+        self,
+        date,
+        symbol,
+        signal_type,
+        candle_close,
+        orb_level,
+        move_pct,
+        triggered_at,
+        suggested_sl=None,
+        orb_stop=None,
+        stop_basis=None,
+    ):
         self._fired.add((date, symbol))
         sid = self._next_id
         self._next_id += 1

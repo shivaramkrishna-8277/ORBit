@@ -72,6 +72,10 @@ class TelegramNotifier:
         move = signal["move_pct"]
         ts = signal["candle_time"]
 
+        orb_stop = signal.get("orb_stop")
+        suggested = signal.get("suggested_sl")
+        stop_basis = signal.get("stop_basis")
+
         if signal["signal_type"] == "BULLISH":
             msg = (
                 f"🟢 BULLISH BREAKOUT — {sym}\n"
@@ -79,6 +83,13 @@ class TelegramNotifier:
                 f"Move:     +{move:.2f}% above ORB\n"
                 f"Time:     {ts}"
             )
+            if orb_stop is not None:
+                msg += f"\nORB SL:   ₹{float(orb_stop):.2f}"
+            if stop_basis == "swing" and suggested is not None:
+                swing_line = f"\nSwing SL: ₹{float(suggested):.2f} (post-ORB low)"
+                if signal.get("swing_at"):
+                    swing_line += f" @ {signal['swing_at']}"
+                msg += swing_line
         else:
             msg = (
                 f"🔴 BEARISH BREAKOUT — {sym}\n"
@@ -86,6 +97,13 @@ class TelegramNotifier:
                 f"Move:     -{move:.2f}% below ORB\n"
                 f"Time:     {ts}"
             )
+            if orb_stop is not None:
+                msg += f"\nORB SL:   ₹{float(orb_stop):.2f}"
+            if stop_basis == "swing" and suggested is not None:
+                swing_line = f"\nSwing SL: ₹{float(suggested):.2f} (post-ORB high)"
+                if signal.get("swing_at"):
+                    swing_line += f" @ {signal['swing_at']}"
+                msg += swing_line
         if signal.get("recalc"):
             msg += "\nRecalculated from today's candles."
 

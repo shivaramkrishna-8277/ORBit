@@ -118,11 +118,23 @@ _DDL = [
 ]
 
 
+def _migrate_signals_columns(con: sqlite3.Connection) -> None:
+    existing = {row[1] for row in con.execute("PRAGMA table_info(signals)")}
+    for name, col_type in (
+        ("suggested_sl", "REAL"),
+        ("orb_stop", "REAL"),
+        ("stop_basis", "TEXT"),
+    ):
+        if name not in existing:
+            con.execute(f"ALTER TABLE signals ADD COLUMN {name} {col_type}")
+
+
 def init_db() -> None:
     """Create all tables if they don't exist. Safe to call on every startup."""
     with _conn() as con:
         for ddl in _DDL:
             con.execute(ddl)
+        _migrate_signals_columns(con)
     logger.info("Database initialised at %s", _DB_PATH)
 
 
@@ -200,14 +212,29 @@ def insert_signal(
     orb_level: float,
     move_pct: float,
     triggered_at: str,
+    suggested_sl: float | None = None,
+    orb_stop: float | None = None,
+    stop_basis: str | None = None,
 ) -> int:
     """Insert a new signal row and return its id."""
     with _conn() as con:
         cur = con.execute(
             """INSERT INTO signals
-               (date, symbol, signal_type, candle_close, orb_level, move_pct, triggered_at, alerted)
-               VALUES (?,?,?,?,?,?,?,0)""",
-            (date, symbol, signal_type, candle_close, orb_level, move_pct, triggered_at),
+               (date, symbol, signal_type, candle_close, orb_level, move_pct, triggered_at,
+                alerted, suggested_sl, orb_stop, stop_basis)
+               VALUES (?,?,?,?,?,?,?,0,?,?,?)""",
+            (
+                date,
+                symbol,
+                signal_type,
+                candle_close,
+                orb_level,
+                move_pct,
+                triggered_at,
+                suggested_sl,
+                orb_stop,
+                stop_basis,
+            ),
         )
         return cur.lastrowid
 

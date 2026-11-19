@@ -197,13 +197,31 @@ async def _ask_stop_loss(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> No
     direction = signal.get("signal_type", "")
     hint = "below entry" if direction == "BULLISH" else "above entry"
 
+    rows: list[list[InlineKeyboardButton]] = []
+    suggested = signal.get("suggested_sl")
+    orb_stop = signal.get("orb_stop")
+    basis = signal.get("stop_basis")
+    if basis == "swing" and suggested is not None and orb_stop is not None:
+        if float(suggested) != float(orb_stop):
+            rows.append([
+                InlineKeyboardButton(
+                    f"Swing SL {_fmt_full(float(suggested))}",
+                    callback_data="tsl_swing",
+                )
+            ])
+    if orb_stop is not None:
+        rows.append([
+            InlineKeyboardButton(f"ORB SL {_fmt_full(float(orb_stop))}", callback_data="tsl_orb")
+        ])
+
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
             f"📐 *{sym}* — 2/2 · *Stop loss*\n"
-            f"Entry: {_fmt_full(entry)} — enter SL ({hint}):"
+            f"Entry: {_fmt_full(entry)} — tap a level or type SL ({hint}):"
         ),
         parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows) if rows else None,
     )
 
 
@@ -248,6 +266,49 @@ async def _on_trade_entry_button(update: Update, context: ContextTypes.DEFAULT_T
     state["step"] = "stop_loss"
     await query.edit_message_text(f"Entry: *{_fmt_full(close)}* ✓", parse_mode="Markdown")
     await _ask_stop_loss(context, chat_id)
+
+
+async def _apply_stop_loss_button(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, source: str
+) -> None:
+    query = update.callback_query
+    await query.answer()
+    chat_id = update.effective_chat.id
+    state = _trade_state.get(chat_id)
+    if not state or state.get("step") != "stop_loss":
+        return
+
+    signal = state.get("signal", {})
+    entry = float(state.get("entry", 0))
+    direction = signal.get("signal_type", "")
+    if source == "swing":
+        sl = float(signal.get("suggested_sl", 0))
+        label = "Swing SL"
+    else:
+        sl = float(signal.get("orb_stop", 0))
+        label = "ORB SL"
+
+    if sl <= 0:
+        await query.edit_message_text("❌ Stop level unavailable — type SL manually.")
+        return
+    if direction == "BULLISH" and sl >= entry:
+        await query.edit_message_text("❌ That stop is not below entry for a long.")
+        return
+    if direction == "BEARISH" and sl <= entry:
+        await query.edit_message_text("❌ That stop is not above entry for a short.")
+        return
+
+    state["stop_loss"] = sl
+    await query.edit_message_text(f"{label}: *{_fmt_full(sl)}* ✓", parse_mode="Markdown")
+    await _finish_trade(context, chat_id)
+
+
+async def _on_stop_swing_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _apply_stop_loss_button(update, context, "swing")
+
+
+async def _on_stop_orb_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _apply_stop_loss_button(update, context, "orb")
 
 
 async def _on_trade_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -298,5 +359,7 @@ def build_position_handlers() -> list:
     return [
         CallbackQueryHandler(_on_daily_capital_button, pattern=r"^dcap_"),
         CallbackQueryHandler(_on_trade_entry_button, pattern=r"^tentry_close$"),
+        CallbackQueryHandler(_on_stop_swing_button, pattern=r"^tsl_swing$"),
+        CallbackQueryHandler(_on_stop_orb_button, pattern=r"^tsl_orb$"),
         MessageHandler(filters.TEXT & ~filters.COMMAND, _on_text_input),
     ]

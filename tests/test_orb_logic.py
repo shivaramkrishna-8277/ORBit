@@ -194,14 +194,21 @@ class TestORBCalculator:
 
 class TestBreakoutDetector:
 
-    def _make_candle(self, close: float, candle_start: datetime | None = None) -> dict:
+    def _make_candle(
+        self,
+        close: float,
+        candle_start: datetime | None = None,
+        *,
+        low: float | None = None,
+        high: float | None = None,
+    ) -> dict:
         if candle_start is None:
             candle_start = ist(9, 45)
         return {
             "candle_start": candle_start,
             "open": close - 1,
-            "high": close + 1,
-            "low": close - 2,
+            "high": high if high is not None else close + 1,
+            "low": low if low is not None else close - 2,
             "close": close,
         }
 
@@ -252,6 +259,46 @@ class TestBreakoutDetector:
         )
         detector.check_candle("NSE:SBIN-EQ", self._make_candle(close=498.5))
         callback.assert_not_called()
+
+    @patch("src.strategy.breakout_detector.db")
+    def test_bullish_signal_carries_swing_stop(self, mock_db):
+        from src.strategy.breakout_detector import BreakoutDetector
+
+        mock_db.has_signal_fired.side_effect = [
+            False,
+            False,
+            True,
+            False,
+        ]
+        mock_db.insert_signal.return_value = 1
+
+        callback = MagicMock()
+        detector = BreakoutDetector(
+            orb_levels={"NSE:BAJAJHFL-EQ": {"orb_high": 81.00, "orb_low": 80.60}},
+            on_breakout_callback=callback,
+        )
+        detector.check_candle(
+            "NSE:BAJAJHFL-EQ",
+            self._make_candle(close=80.95, candle_start=ist(9, 35), low=81.10, high=81.40),
+        )
+        detector.check_candle(
+            "NSE:BAJAJHFL-EQ",
+            self._make_candle(close=80.98, candle_start=ist(9, 40), low=81.02, high=81.30),
+        )
+        detector.check_candle(
+            "NSE:BAJAJHFL-EQ",
+            self._make_candle(close=80.99, candle_start=ist(9, 45), low=81.50, high=81.95),
+        )
+        detector.check_candle(
+            "NSE:BAJAJHFL-EQ",
+            self._make_candle(close=82.10, candle_start=ist(9, 50), low=81.90, high=82.15),
+        )
+
+        callback.assert_called_once()
+        signal = callback.call_args[0][0]
+        assert signal["stop_basis"] == "swing"
+        assert signal["suggested_sl"] == 81.02
+        assert signal["orb_stop"] == 80.60
 
     @patch("src.strategy.breakout_detector.db")
     def test_duplicate_bullish_signal_fires_only_once(self, mock_db):

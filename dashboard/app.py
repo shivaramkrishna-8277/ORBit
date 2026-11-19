@@ -450,6 +450,9 @@ with tab_day:
                             "Symbol": _ticker(r["symbol"]),
                             "Side": r["signal_type"],
                             "Close": r["candle_close"],
+                            "Swing SL": r["suggested_sl"],
+                            "ORB SL": r["orb_stop"],
+                            "SL basis": r.get("stop_basis") or "—",
                             "Move %": round(r["move_pct"], 2),
                             "Time": r["triggered_at"],
                         }
