@@ -12,10 +12,12 @@ import streamlit as st
 
 from src.broker.symbol_search import load_master, resolve_nse_equity, search_nse_equity
 from src.config import NIFTY50_SYMBOLS
+from src.broker.auth import is_token_valid
 from src.strategy.runtime_settings import (
     BREAKOUT_TIMEFRAMES,
     ORB_DURATIONS,
     StrategySettings,
+    enqueue_fyers_auth,
     enqueue_recalc,
     load_settings,
     normalize_symbol,
@@ -221,6 +223,26 @@ with right:
             )
 
     st.divider()
+    st.subheader("Fyers access")
+    token_ok = is_token_valid()
+    st.caption("Today's API token: valid." if token_ok else "Today's API token: missing or expired.")
+    auth_busy = db.has_active_command("fyers_auth")
+    if st.button(
+        "Send new login link to Telegram",
+        disabled=auth_busy,
+        help="Opens the Fyers login flow; the bot sends you a link on Telegram (about 10 minutes to complete).",
+    ):
+        try:
+            cmd_id = enqueue_fyers_auth()
+        except ValueError as exc:
+            st.error(str(exc))
+        else:
+            st.success(
+                f"Login request #{cmd_id} queued. Check Telegram within a few seconds "
+                "for the Fyers link."
+            )
+
+    st.divider()
     confirm = st.checkbox(
         "Clear today's signals and send every qualifying breakout again",
     )
@@ -234,22 +256,31 @@ with right:
             st.success(f"Recalculation #{command_id} queued. The bot runs it on its next check.")
 
 
+def _command_banner(title: str, command: dict | None) -> None:
+    st.markdown(f"**{title}**")
+    if command is None:
+        st.caption("None yet.")
+        return
+    status = command["status"]
+    detail = command["detail"] or "Waiting for the bot."
+    line = f"#{command['id']} · {status} · {command['created_at']}"
+    text = f"{line}\n\n{detail}"
+    if status == "done":
+        st.success(text)
+    elif status == "error":
+        st.error(text)
+    else:
+        st.warning(text)
+
+
 @st.fragment(run_every=5)
 def _status() -> None:
-    command = db.latest_command()
-    st.subheader("Last recalculation")
-    if command is None:
-        st.info("No recalculation has been requested yet.")
-    else:
-        status = command["status"]
-        detail = command["detail"] or "Waiting for the bot."
-        line = f"#{command['id']} · {status} · requested {command['created_at']}"
-        if status == "done":
-            st.success(f"{line}\n\n{detail}")
-        elif status == "error":
-            st.error(f"{line}\n\n{detail}")
-        else:
-            st.warning(f"{line}\n\n{detail}")
+    st.subheader("Dashboard jobs")
+    jobs = st.columns(2)
+    with jobs[0]:
+        _command_banner("Last Fyers login request", db.latest_command_for("fyers_auth"))
+    with jobs[1]:
+        _command_banner("Last recalculation", db.latest_command_for("recalc"))
 
     today = datetime.now(IST).strftime("%Y-%m-%d")
     rows = db.get_orb_level_rows(today)

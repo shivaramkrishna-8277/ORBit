@@ -131,3 +131,11 @@ def enqueue_recalc() -> int:
     db.init_db()
     created = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
     return db.enqueue_command("recalc", created)
+
+
+def enqueue_fyers_auth() -> int:
+    db.init_db()
+    if db.has_active_command("fyers_auth"):
+        raise ValueError("A Fyers login request is already pending or in progress.")
+    created = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+    return db.enqueue_command("fyers_auth", created)

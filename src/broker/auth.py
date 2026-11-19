@@ -190,15 +190,39 @@ def generate_access_token_via_redirect(
         _oauth_lock.release()
 
 
+def _expected_redirect_hint() -> str:
+    """Human-readable redirect URI guidance for VPS + domain setups."""
+    uri = config.FYERS_REDIRECT_URI.rstrip("/")
+    if uri in ("http://127.0.0.1", "http://localhost"):
+        return f"{uri} (with ?auth_code=… after login)"
+    if not uri.endswith("/callback"):
+        return f"{uri}/callback"
+    return uri
+
+
+def _warn_redirect_uri() -> None:
+    """The dashboard domain must not be used as the Fyers redirect — only /callback."""
+    uri = config.FYERS_REDIRECT_URI.strip().rstrip("/")
+    if uri and not uri.endswith("/callback") and "127.0.0.1" not in uri and "localhost" not in uri:
+        logger.error(
+            "FYERS_REDIRECT_URI is '%s' but should end with '/callback' "
+            "(e.g. https://orbit.brancotech.in/callback). "
+            "Update .env and myapi.fyers.in → your app → Redirect URI, then redeploy.",
+            config.FYERS_REDIRECT_URI,
+        )
+
+
 def _run_oauth_redirect(
     send_fn: Optional[Callable[[str], None]],
     timeout_secs: int,
 ) -> str:
     from src import config
 
+    _warn_redirect_uri()
     port     = config.OAUTH_CALLBACK_PORT
     received: dict = {}
     done     = threading.Event()
+    expected = _expected_redirect_hint()
 
     class _Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -217,8 +241,22 @@ def _run_oauth_redirect(
                 )
                 done.set()
             else:
-                self.send_response(400)
+                body = (
+                    "<html><body style='font-family:sans-serif;padding:40px;max-width:520px'>"
+                    "<h1>Fyers callback</h1>"
+                    f"<p>No <code>auth_code</code> in this request ({self.path}).</p>"
+                    "<p>If you landed here after login, the <strong>Redirect URI</strong> in "
+                    "myapi.fyers.in is probably pointing at the dashboard site root instead of "
+                    f"<strong>{expected}</strong>.</p>"
+                    "<p>Fix: set the same Redirect URI in Fyers and in "
+                    "<code>FYERS_REDIRECT_URI</code>, and proxy <code>/callback</code> in nginx "
+                    "to the bot on port 8080 (see <code>deploy/nginx-orbit.example.conf</code>).</p>"
+                    "</body></html>"
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
+                self.wfile.write(body)
 
         def log_message(self, *args):
             pass
@@ -238,9 +276,11 @@ def _run_oauth_redirect(
     logger.info("Fyers login URL: %s", auth_url)
 
     msg = (
-        "🔑 *Fyers login required — tap to authenticate:*\n\n"
+        "🔑 Fyers login required — open this link:\n\n"
         f"{auth_url}\n\n"
-        "_After login you will see 'Login successful'. No further action needed._"
+        f"Redirect URI must be: {_expected_redirect_hint()}\n"
+        "After login you should see ‘Login successful’. "
+        "If you land on the dashboard instead, fix Redirect URI and nginx /callback."
     )
     if send_fn:
         if not send_fn(msg):

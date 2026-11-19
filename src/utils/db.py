@@ -370,6 +370,32 @@ def latest_command() -> dict | None:
     return dict(row) if row else None
 
 
+def latest_command_for(action: str) -> dict | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM dashboard_commands WHERE action=? ORDER BY id DESC LIMIT 1",
+            (action,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def has_active_command(action: str | None = None) -> bool:
+    """True if a command is still pending or running."""
+    with _conn() as con:
+        if action:
+            row = con.execute(
+                """SELECT 1 FROM dashboard_commands
+                   WHERE action=? AND status IN ('pending', 'running') LIMIT 1""",
+                (action,),
+            ).fetchone()
+        else:
+            row = con.execute(
+                """SELECT 1 FROM dashboard_commands
+                   WHERE status IN ('pending', 'running') LIMIT 1"""
+            ).fetchone()
+    return row is not None
+
+
 def get_daily_capital(date: str) -> dict | None:
     with _conn() as con:
         row = con.execute(

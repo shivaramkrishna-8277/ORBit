@@ -343,34 +343,77 @@ class SessionManager:
             self._job_lock.release()
 
     def _poll_dashboard(self) -> None:
-        """Pick up a recalculation requested from the dashboard."""
+        """Run recalc or Fyers login jobs queued from the dashboard."""
         try:
             settings = load_settings()
             self._apply_candle_intervals(settings)
         except Exception:
             logger.exception("Could not read dashboard settings.")
             return
-        if not self._job_lock.acquire(blocking=False):
-            return
-        try:
-            command = db.claim_next_command()
-            if command is None:
-                return
+
+        command = None
+        if self._job_lock.acquire(blocking=False):
             try:
-                detail = self._run_orb(clear_signals=True, rescan=True)
-                db.finish_command(
-                    command["id"], "done", detail,
-                    datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
-                )
+                command = db.claim_next_command()
+            finally:
+                self._job_lock.release()
+
+        if command is None:
+            return
+
+        threading.Thread(
+            target=self._handle_dashboard_command,
+            args=(int(command["id"]), command["action"]),
+            daemon=True,
+            name=f"dashboard-{command['action']}-{command['id']}",
+        ).start()
+
+    def _finish_dashboard_command(self, command_id: int, status: str, detail: str) -> None:
+        db.finish_command(
+            command_id,
+            status,
+            detail,
+            datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
+        )
+
+    def _handle_dashboard_command(self, command_id: int, action: str) -> None:
+        try:
+            if action == "recalc":
+                if not self._job_lock.acquire(blocking=True, timeout=120):
+                    raise RuntimeError("Bot is busy; try again in a minute.")
+                try:
+                    detail = self._run_orb(clear_signals=True, rescan=True)
+                finally:
+                    self._job_lock.release()
+                self._finish_dashboard_command(command_id, "done", detail)
                 logger.info("Dashboard recalculation finished: %s", detail)
-            except Exception as exc:
-                logger.exception("Dashboard recalculation failed.")
-                db.finish_command(
-                    command["id"], "error", str(exc),
-                    datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S"),
-                )
-        finally:
-            self._job_lock.release()
+            elif action == "fyers_auth":
+                self._run_dashboard_fyers_auth(command_id)
+            else:
+                self._finish_dashboard_command(command_id, "error", f"Unknown action: {action}")
+        except Exception as exc:
+            logger.exception("Dashboard command %s failed", action)
+            self._finish_dashboard_command(command_id, "error", str(exc))
+
+    def _run_dashboard_fyers_auth(self, command_id: int) -> None:
+        """Send a fresh Fyers login link on Telegram (up to ~10 min wait)."""
+        if is_oauth_in_progress():
+            raise OAuthInProgressError(
+                "Fyers login is already in progress — open the link in Telegram."
+            )
+        if not self._dry_run:
+            self._notifier.send_message(
+                "🔑 Dashboard requested a new Fyers login. The link below is valid for ~10 minutes."
+            )
+        send_fn = self._notifier.send_message if not self._dry_run else None
+        token = auth.generate_access_token_via_redirect(send_fn=send_fn, timeout_secs=600)
+        self._access_token = token
+        self._finish_dashboard_command(
+            command_id,
+            "done",
+            "Login link sent to Telegram. Token saved for today.",
+        )
+        logger.info("Dashboard Fyers auth completed.")
 
     def _job_15_15(self) -> None:
         """Session end: stop stream, send summary, reset state."""
