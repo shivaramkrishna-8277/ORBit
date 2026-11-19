@@ -97,6 +97,57 @@ def test_session_close_is_excluded_from_win_rate():
     assert scored["avg_r"] == 0.5
 
 
+def test_subset_range_uses_the_wider_cache():
+    from src.backtest.history import range_is_cached
+
+    store = {
+        "symbols": ("NSE:AAA-EQ", "NSE:BBB-EQ"),
+        "start": date(2026, 4, 1),
+        "end": date(2026, 10, 31),
+        "bars": {},
+    }
+    assert range_is_cached(store, ["NSE:AAA-EQ", "NSE:BBB-EQ"], date(2026, 4, 1), date(2026, 4, 30))
+    assert not range_is_cached(store, ["NSE:AAA-EQ"], date(2026, 4, 1), date(2026, 11, 2))
+
+
+def test_trade_chart_runs_from_the_open_until_the_exit():
+    from src.backtest.chart import trade_candles, trade_levels
+
+    bars = []
+    cursor = IST.localize(datetime(2026, 4, 1, 9, 15))
+    for _ in range(50):
+        bars.append(
+            {
+                "datetime": cursor,
+                "open": 100.0,
+                "high": 100.4,
+                "low": 99.6,
+                "close": 100.1,
+                "volume": 10,
+            }
+        )
+        cursor += timedelta(minutes=1)
+    trade = {
+        "date": "2026-04-01",
+        "exit_time": "09:30",
+        "entry": 101.0,
+        "stop": 99.4,
+        "target": 104.0,
+        "orb_high": 100.4,
+        "orb_low": 99.6,
+    }
+    candles = trade_candles(trade, bars, orb_minutes=5, breakout_minutes=5)
+    assert candles[0]["candle_start"].strftime("%H:%M") == "09:15"
+    assert candles[-1]["candle_start"].strftime("%H:%M") == "09:25"
+    assert [level["name"] for level in trade_levels(trade)] == [
+        "ORB high",
+        "ORB low",
+        "Entry",
+        "Stop",
+        "Target",
+    ]
+
+
 def test_cached_days_are_not_downloaded_again():
     from src.backtest.history import missing_spans
 

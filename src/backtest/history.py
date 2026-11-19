@@ -86,11 +86,60 @@ def _parse(stamp: str) -> datetime:
 
 
 def _covered_days(con: sqlite3.Connection, symbol: str, start: date, end: date) -> set[str]:
-    rows = con.execute(
+    """Days already stored for this symbol, from the fetch log or from the bars themselves."""
+    logged = con.execute(
         "SELECT day FROM fetch_log WHERE symbol=? AND day>=? AND day<=?",
         (symbol, start.isoformat(), end.isoformat()),
     ).fetchall()
-    return {row[0] for row in rows}
+    stored = con.execute(
+        """SELECT DISTINCT substr(ts, 1, 10) FROM minute_bars
+           WHERE symbol=? AND ts>=? AND ts<=?""",
+        (symbol, f"{start.isoformat()} 00:00:00", f"{end.isoformat()} 23:59:59"),
+    ).fetchall()
+    return {row[0] for row in logged} | {row[0] for row in stored}
+
+
+def _session_complete(con: sqlite3.Connection, symbol: str, day: date) -> bool:
+    row = con.execute(
+        """SELECT 1 FROM minute_bars
+           WHERE symbol=? AND ts>=? AND ts<? LIMIT 1""",
+        (symbol, f"{day.isoformat()} 15:10:00", f"{day.isoformat()} 15:30:00"),
+    ).fetchone()
+    return row is not None
+
+
+def range_is_cached(store: dict | None, symbols: list[str], start: date, end: date) -> bool:
+    """True when an in-memory download already covers this watchlist and date range."""
+    if not store:
+        return False
+    if set(symbols) - set(store.get("symbols") or ()):
+        return False
+    return store["start"] <= start and end <= store["end"]
+
+
+def slice_bars(bars: dict[str, list[dict]], start: date, end: date) -> dict[str, list[dict]]:
+    """Return minute bars inside an inclusive date range."""
+    return {
+        symbol: [bar for bar in series if start <= bar["datetime"].date() <= end]
+        for symbol, series in bars.items()
+    }
+
+
+def merge_bar_store(previous: dict | None, symbols: list[str], start: date, end: date, bars: dict[str, list[dict]]) -> dict:
+    """Keep the widest downloaded range for this watchlist."""
+    symbols = tuple(symbols)
+    if previous and set(symbols) <= set(previous.get("symbols") or ()):
+        start = min(previous["start"], start)
+        end = max(previous["end"], end)
+        base = previous["bars"]
+    else:
+        base = {}
+    merged: dict[str, list[dict]] = {}
+    for symbol in symbols:
+        by_ts = {bar["datetime"]: bar for bar in base.get(symbol, [])}
+        by_ts.update({bar["datetime"]: bar for bar in bars.get(symbol, [])})
+        merged[symbol] = [by_ts[key] for key in sorted(by_ts)]
+    return {"symbols": symbols, "start": start, "end": end, "bars": merged}
 
 
 def _mark_fetched(con: sqlite3.Connection, symbol: str, start: date, end: date) -> None:
@@ -134,8 +183,9 @@ def load_watchlist_minutes(client, symbols: list[str], start: date, end: date, p
     try:
         for index, symbol in enumerate(symbols, start=1):
             today = datetime.now(IST).date()
-            refresh = today if start <= today <= end else None
-            spans = missing_spans(days, _covered_days(con, symbol, start, end), refresh=refresh)
+            covered = _covered_days(con, symbol, start, end)
+            refresh = today if today in days and not _session_complete(con, symbol, today) else None
+            spans = missing_spans(days, covered, refresh=refresh)
             if progress:
                 state = "download" if spans else "cache"
                 progress(f"History {index}/{len(symbols)} · {symbol} · {state}")

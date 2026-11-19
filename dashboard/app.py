@@ -558,19 +558,15 @@ with tab_backtest:
                     def _progress(message: str) -> None:
                         note.write(message)
 
-                    from src.backtest.history import load_watchlist_minutes
+                    from src.backtest.history import load_watchlist_minutes, merge_bar_store, range_is_cached, slice_bars
 
                     token = get_access_token(allow_oauth=False)
                     client = get_client(token)
-                    hist_key = (
-                        tuple(request.symbols),
-                        request.date_from.isoformat(),
-                        request.date_to.isoformat(),
-                    )
-                    bars = None
-                    if st.session_state.get("bt_hist_key") == hist_key:
-                        bars = st.session_state.get("bt_hist_bars")
-                    if bars is None:
+                    store = st.session_state.get("bt_hist_store")
+                    if range_is_cached(store, request.symbols, request.date_from, request.date_to):
+                        _progress("Using cached history for this date range. No download.")
+                        bars = slice_bars(store["bars"], request.date_from, request.date_to)
+                    else:
                         bars = load_watchlist_minutes(
                             client,
                             request.symbols,
@@ -578,8 +574,9 @@ with tab_backtest:
                             request.date_to,
                             progress=_progress,
                         )
-                        st.session_state.bt_hist_bars = bars
-                        st.session_state.bt_hist_key = hist_key
+                        st.session_state.bt_hist_store = merge_bar_store(
+                            store, request.symbols, request.date_from, request.date_to, bars
+                        )
                     report = run_backtest(client, request, progress=_progress, minute_bars=bars)
                     st.session_state.backtest_report = report
                     status.update(label="Backtest finished", state="complete")
@@ -606,31 +603,126 @@ with tab_backtest:
 
         trades_tab, days_tab, skips_tab = st.tabs(["Trades", "Days", "Skipped"])
         with trades_tab:
-            if report["trade_rows"]:
-                st.dataframe(
-                    [
-                        {
-                            "Date": row["date"],
-                            "Symbol": row["ticker"],
-                            "Side": row["side"],
-                            "Entry": row["entry_time"],
-                            "Price": round(row["entry"], 2),
-                            "Stop": round(row["stop"], 2),
-                            "Basis": row["stop_basis"],
-                            "Target": round(row["target"], 2),
-                            "Exit": row["exit_time"],
-                            "Exit px": round(row["exit"], 2),
-                            "Why": row["exit_reason"],
-                            "Qty": row["qty"],
-                            "P&L": round(row["pnl"], 2),
-                            "R": round(row["r_multiple"], 2),
-                        }
-                        for row in report["trade_rows"]
-                    ],
-                    hide_index=True,
-                    use_container_width=True,
-                    height=420,
+            rows = report["trade_rows"]
+            if rows:
+                from src.backtest.chart import exit_label, trade_candles, trade_levels
+
+                reasons = sorted({row["exit_reason"] for row in rows})
+                symbols = sorted({row["ticker"] for row in rows})
+                f1, f2, f3 = st.columns(3)
+                filter_key = f"{report.get('generated_at', '')}-{report['trades']}"
+                picked_reasons = f1.multiselect(
+                    "Exit",
+                    options=reasons,
+                    default=reasons,
+                    format_func=exit_label,
+                    key=f"bt_filter_exit_{filter_key}",
                 )
+                picked_sides = f2.multiselect(
+                    "Side",
+                    options=["BULLISH", "BEARISH"],
+                    default=["BULLISH", "BEARISH"],
+                    key=f"bt_filter_side_{filter_key}",
+                )
+                picked_symbols = f3.multiselect(
+                    "Symbol",
+                    options=symbols,
+                    default=symbols,
+                    key=f"bt_filter_symbol_{filter_key}",
+                )
+                shown = [
+                    row for row in rows
+                    if row["exit_reason"] in picked_reasons
+                    and row["side"] in picked_sides
+                    and row["ticker"] in picked_symbols
+                ]
+                st.caption(f"{len(shown)} of {len(rows)} trades")
+
+                @st.dialog("Trade chart", width="large")
+                def _trade_chart(trade: dict) -> None:
+                    import altair as alt
+                    import pandas as pd
+
+                    store = st.session_state.get("bt_hist_store") or {}
+                    series = (store.get("bars") or {}).get(trade["symbol"], [])
+                    candles = trade_candles(
+                        trade,
+                        series,
+                        orb_minutes=int(report.get("orb_minutes") or 15),
+                        breakout_minutes=int(report.get("breakout_minutes") or 5),
+                    )
+                    st.markdown(
+                        f"**{trade['ticker']}** · {trade['date']} · {trade['side']} · "
+                        f"{exit_label(trade['exit_reason'])} at {trade['exit_time']}"
+                    )
+                    if not candles or trade.get("orb_high") is None:
+                        st.info("Run this backtest again to load the chart for this trade.")
+                        return
+                    frame = pd.DataFrame(
+                        [
+                            {
+                                "time": candle["candle_start"].strftime("%H:%M"),
+                                "open": candle["open"],
+                                "high": candle["high"],
+                                "low": candle["low"],
+                                "close": candle["close"],
+                            }
+                            for candle in candles
+                        ]
+                    )
+                    up = alt.datum.close >= alt.datum.open
+                    color = alt.condition(up, alt.value("#1f8a70"), alt.value("#c44536"))
+                    base = alt.Chart(frame).encode(
+                        x=alt.X("time:N", sort=None, title=""),
+                        color=color,
+                        tooltip=["time:N", "open:Q", "high:Q", "low:Q", "close:Q"],
+                    )
+                    wick = base.mark_rule().encode(y="low:Q", y2="high:Q")
+                    body = base.mark_bar(size=10).encode(y="open:Q", y2="close:Q")
+                    levels = pd.DataFrame(trade_levels(trade))
+                    lines = (
+                        alt.Chart(levels)
+                        .mark_rule(strokeDash=[6, 4])
+                        .encode(
+                            y="price:Q",
+                            color=alt.Color(
+                                "name:N",
+                                scale=alt.Scale(
+                                    domain=["ORB high", "ORB low", "Entry", "Stop", "Target"],
+                                    range=["#3d8bfd", "#3d8bfd", "#f0c14b", "#c44536", "#1f8a70"],
+                                ),
+                                legend=alt.Legend(title=""),
+                            ),
+                        )
+                    )
+                    st.altair_chart(
+                        (wick + body + lines).resolve_scale(color="independent").properties(height=420),
+                        use_container_width=True,
+                    )
+
+                header = st.columns([1.15, 0.9, 0.85, 0.7, 0.8, 0.8, 0.8, 0.7, 0.95, 0.7, 0.55, 0.45])
+                for col, name in zip(
+                    header,
+                    ["Date", "Symbol", "Side", "Entry", "Price", "Stop", "Target", "Exit", "Why", "P&L", "R", ""],
+                ):
+                    col.caption(name)
+                with st.container(height=460):
+                    for trade in shown:
+                        cols = st.columns([1.15, 0.9, 0.85, 0.7, 0.8, 0.8, 0.8, 0.7, 0.95, 0.7, 0.55, 0.45])
+                        cols[0].write(trade["date"])
+                        cols[1].write(trade["ticker"])
+                        cols[2].write(trade["side"].title())
+                        cols[3].write(trade["entry_time"])
+                        cols[4].write(f"{trade['entry']:.2f}")
+                        cols[5].write(f"{trade['stop']:.2f}")
+                        cols[6].write(f"{trade['target']:.2f}")
+                        cols[7].write(trade["exit_time"])
+                        cols[8].write(exit_label(trade["exit_reason"]))
+                        cols[9].write(f"{trade['pnl']:,.0f}")
+                        cols[10].write(f"{trade['r_multiple']:.2f}")
+                        chart_key = f"chart_{trade['date']}_{trade['symbol']}_{trade['entry_time']}"
+                        if cols[11].button("📈", key=chart_key, help="Chart"):
+                            _trade_chart(trade)
             else:
                 st.caption("No trades.")
         with days_tab:

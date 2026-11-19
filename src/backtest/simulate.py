@@ -134,6 +134,8 @@ def _signals_for_symbol(
             "interested": interested,
             "volume_ratio": ratio,
             "range_pct": range_pct,
+            "orb_high": float(orb["high"]),
+            "orb_low": float(orb["low"]),
         }
         return signal, candles
     return None, candles
@@ -217,6 +219,8 @@ def simulate_day(
                 "qty": pos["qty"],
                 "pnl": pnl,
                 "r_multiple": pnl / risk,
+                "orb_high": pos.get("orb_high"),
+                "orb_low": pos.get("orb_low"),
             }
         )
 

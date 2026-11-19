@@ -146,6 +146,8 @@ def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=No
         "ending_equity": equity,
         "max_drawdown": max_drawdown,
         "avg_r": scored["avg_r"],
+        "orb_minutes": request.orb_duration_minutes,
+        "breakout_minutes": request.breakout_timeframe_minutes,
         "trade_rows": trades,
         "skip_rows": skipped,
         "daily_rows": daily,
