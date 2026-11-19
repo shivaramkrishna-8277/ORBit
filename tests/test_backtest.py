@@ -111,7 +111,7 @@ def test_subset_range_uses_the_wider_cache():
 
 
 def test_trade_chart_runs_from_the_open_until_the_exit():
-    from src.backtest.chart import trade_candles, trade_levels
+    from src.backtest.chart import price_window, trade_candles, trade_levels
 
     bars = []
     cursor = IST.localize(datetime(2026, 4, 1, 9, 15))
@@ -136,9 +136,11 @@ def test_trade_chart_runs_from_the_open_until_the_exit():
         "orb_high": 100.4,
         "orb_low": 99.6,
     }
-    candles = trade_candles(trade, bars, orb_minutes=5, breakout_minutes=5)
-    assert candles[0]["candle_start"].strftime("%H:%M") == "09:15"
-    assert candles[-1]["candle_start"].strftime("%H:%M") == "09:25"
+    candles = trade_candles(trade, bars, orb_minutes=15, breakout_minutes=5)
+    assert [candle["candle_start"].strftime("%H:%M") for candle in candles] == ["09:15", "09:20", "09:25"]
+    low, high = price_window(candles, trade_levels(trade))
+    assert low > 90
+    assert high < 120
     assert [level["name"] for level in trade_levels(trade)] == [
         "ORB high",
         "ORB low",

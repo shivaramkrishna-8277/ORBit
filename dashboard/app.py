@@ -605,7 +605,7 @@ with tab_backtest:
         with trades_tab:
             rows = report["trade_rows"]
             if rows:
-                from src.backtest.chart import exit_label, trade_candles, trade_levels
+                    from src.backtest.chart import exit_label, price_window, trade_candles, trade_levels
 
                 reasons = sorted({row["exit_reason"] for row in rows})
                 symbols = sorted({row["ticker"] for row in rows})
@@ -670,33 +670,50 @@ with tab_backtest:
                             for candle in candles
                         ]
                     )
+                    levels = trade_levels(trade)
+                    low, high = price_window(candles, levels)
+                    scale = alt.Scale(domain=[low, high], zero=False, nice=False)
+                    times = frame["time"].tolist()
                     up = alt.datum.close >= alt.datum.open
                     color = alt.condition(up, alt.value("#1f8a70"), alt.value("#c44536"))
-                    base = alt.Chart(frame).encode(
-                        x=alt.X("time:N", sort=None, title=""),
-                        color=color,
-                        tooltip=["time:N", "open:Q", "high:Q", "low:Q", "close:Q"],
+                    x = alt.X("time:O", sort=times, title=None, axis=alt.Axis(labelAngle=0))
+                    tip = ["time:O", "open:Q", "high:Q", "low:Q", "close:Q"]
+                    wick = (
+                        alt.Chart(frame)
+                        .mark_rule()
+                        .encode(x=x, y=alt.Y("low:Q", scale=scale, title="Price"), y2="high:Q", color=color, tooltip=tip)
                     )
-                    wick = base.mark_rule().encode(y="low:Q", y2="high:Q")
-                    body = base.mark_bar(size=10).encode(y="open:Q", y2="close:Q")
-                    levels = pd.DataFrame(trade_levels(trade))
+                    body = (
+                        alt.Chart(frame)
+                        .mark_bar()
+                        .encode(
+                            x=x,
+                            y=alt.Y("open:Q", scale=scale, axis=None),
+                            y2="close:Q",
+                            color=color,
+                            tooltip=tip,
+                        )
+                    )
+                    level_frame = pd.DataFrame(levels)
                     lines = (
-                        alt.Chart(levels)
+                        alt.Chart(level_frame)
                         .mark_rule(strokeDash=[6, 4])
                         .encode(
-                            y="price:Q",
+                            y=alt.Y("price:Q", scale=scale, axis=None),
                             color=alt.Color(
                                 "name:N",
                                 scale=alt.Scale(
                                     domain=["ORB high", "ORB low", "Entry", "Stop", "Target"],
-                                    range=["#3d8bfd", "#3d8bfd", "#f0c14b", "#c44536", "#1f8a70"],
+                                    range=["#3d8bfd", "#7eb6ff", "#f0c14b", "#c44536", "#1f8a70"],
                                 ),
-                                legend=alt.Legend(title=""),
+                                legend=alt.Legend(title=None, orient="top"),
                             ),
                         )
                     )
+                    minutes = int(report.get("breakout_minutes") or 5)
+                    st.caption(f"{minutes}-minute candles, 09:15 to {trade['exit_time']}")
                     st.altair_chart(
-                        (wick + body + lines).resolve_scale(color="independent").properties(height=420),
+                        (wick + body + lines).resolve_scale(color="independent", y="shared").properties(height=420),
                         use_container_width=True,
                     )
 
