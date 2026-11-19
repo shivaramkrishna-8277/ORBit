@@ -95,6 +95,19 @@ def is_market_open(check_date: date | datetime | None = None) -> bool:
     return True
 
 
+def trading_days(start: date, end: date) -> list[date]:
+    """Weekdays in [start, end] that are not on the NSE holiday list."""
+    if end < start:
+        return []
+    out: list[date] = []
+    cursor = start
+    while cursor <= end:
+        if cursor.weekday() < 5 and cursor.strftime("%Y-%m-%d") not in _HOLIDAYS:
+            out.append(cursor)
+        cursor += timedelta(days=1)
+    return out
+
+
 def next_trading_day(from_date: date | datetime | None = None) -> date:
     """
     Return the next calendar date on which NSE trades.

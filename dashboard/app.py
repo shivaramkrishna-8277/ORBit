@@ -266,7 +266,7 @@ m2.metric("Fyers token", "OK" if token_ok else "Login needed")
 m3.metric("Qualified today", qualified)
 m4.metric("Breakouts today", len(db.get_signals(today)))
 
-tab_list, tab_rules, tab_day = st.tabs(["Watchlist", "Strategy", "Today"])
+tab_list, tab_rules, tab_day, tab_backtest = st.tabs(["Watchlist", "Strategy", "Today", "Backtest"])
 
 # ── Watchlist ──────────────────────────────────────────────────────────────────
 
@@ -465,3 +465,184 @@ with tab_day:
                 st.caption("No breakout alerts yet.")
 
     _live_status()
+
+# ── Backtest ───────────────────────────────────────────────────────────────────
+
+with tab_backtest:
+    st.caption(
+        "Replays the watchlist on 1-minute history. Entry is the breakout close, "
+        "stop is the latest swing or the opening-range extreme, and the target is entry ± RRR × risk. "
+        "Same-time names are ranked by volume versus the average of earlier breakout candles since the range ended. "
+        "Size never exceeds the capital you enter here, and it shrinks after a losing day."
+    )
+    default_to = datetime.now(IST).date()
+    default_from = default_to - timedelta(days=30)
+    with st.form("backtest_form"):
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            bt_from = st.date_input("From", value=default_from)
+            bt_capital = st.number_input("Capital (₹)", min_value=1000.0, value=100_000.0, step=10_000.0)
+            bt_margin = st.selectbox("Margin", options=[4, 5, 10], index=1, format_func=lambda n: f"{n}×")
+        with d2:
+            bt_to = st.date_input("To", value=default_to)
+            bt_risk = st.number_input("Risk per trade (%)", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
+            bt_day_risk = st.number_input("Risk per day (%)", min_value=0.1, max_value=20.0, value=3.0, step=0.1)
+        with d3:
+            bt_rrr = st.number_input("Reward : risk", min_value=0.5, max_value=10.0, value=2.0, step=0.5)
+            bt_max_trades = st.number_input("Max trades per day", min_value=1, max_value=20, value=3, step=1)
+            bt_price_on = st.toggle("Price filter", value=settings.max_price_enabled)
+
+        r1, r2, r3 = st.columns(3)
+        with r1:
+            bt_max_price = st.number_input(
+                "Max price (₹)",
+                min_value=1.0,
+                value=float(settings.max_stock_price),
+                step=10.0,
+                disabled=not bt_price_on,
+            )
+        with r2:
+            bt_threshold = st.number_input(
+                "Max ORB range (%)",
+                min_value=0.05,
+                max_value=20.0,
+                value=float(settings.orb_range_threshold),
+                step=0.05,
+                format="%.2f",
+            )
+            bt_duration = st.selectbox(
+                "Opening range from 09:15",
+                options=list(ORB_DURATIONS),
+                index=list(ORB_DURATIONS).index(settings.orb_duration_minutes),
+                format_func=lambda m: f"{m} min (ends {_end_label(m)})",
+            )
+        with r3:
+            bt_timeframe = st.selectbox(
+                "Breakout candle size",
+                options=list(BREAKOUT_TIMEFRAMES),
+                index=list(BREAKOUT_TIMEFRAMES).index(settings.breakout_timeframe_minutes),
+                format_func=lambda m: f"{m} minutes",
+            )
+        run_bt = st.form_submit_button("Run backtest", type="primary")
+
+    if run_bt:
+        if not st.session_state.symbols:
+            st.error("Add symbols on the Watchlist tab first.")
+        elif not is_token_valid():
+            st.error("Fyers token is missing. Use Strategy → Telegram: new Fyers login, then run again.")
+        else:
+            from src.backtest.engine import BacktestRequest, run_backtest
+            from src.broker.auth import get_access_token
+            from src.broker.fyers_client import get_client
+
+            request = BacktestRequest(
+                symbols=list(st.session_state.symbols),
+                date_from=bt_from,
+                date_to=bt_to,
+                orb_range_threshold=float(bt_threshold),
+                orb_duration_minutes=int(bt_duration),
+                breakout_timeframe_minutes=int(bt_timeframe),
+                max_price_enabled=bool(bt_price_on),
+                max_stock_price=float(bt_max_price),
+                capital=float(bt_capital),
+                margin_multiplier=float(bt_margin),
+                risk_pct=float(bt_risk),
+                day_risk_pct=float(bt_day_risk),
+                max_trades_per_day=int(bt_max_trades),
+                rrr=float(bt_rrr),
+            )
+            try:
+                with st.status("Running backtest…", expanded=True) as status:
+                    note = st.empty()
+
+                    def _progress(message: str) -> None:
+                        note.write(message)
+
+                    token = get_access_token(allow_oauth=False)
+                    report = run_backtest(get_client(token), request, progress=_progress)
+                    st.session_state.backtest_report = report
+                    status.update(label="Backtest finished", state="complete")
+            except Exception as exc:
+                st.error(str(exc))
+
+    report = st.session_state.get("backtest_report")
+    if report:
+        st.subheader("Report")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Gross P&L", f"₹{report['gross_pnl']:,.0f}")
+        k2.metric("Trades", report["trades"])
+        k3.metric("Win rate", f"{report['win_rate']:.1f}%")
+        k4.metric("Max drawdown", f"₹{report['max_drawdown']:,.0f}")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Ending equity", f"₹{report['ending_equity']:,.0f}")
+        c2.metric("Average R", f"{report['avg_r']:.2f}")
+        c3.metric("Sessions", report["sessions"])
+        st.caption(f"{report['wins']} wins · {report['losses']} losses · {report['symbols']} symbols")
+
+        trades_tab, days_tab, skips_tab = st.tabs(["Trades", "Days", "Skipped"])
+        with trades_tab:
+            if report["trade_rows"]:
+                st.dataframe(
+                    [
+                        {
+                            "Date": row["date"],
+                            "Symbol": row["ticker"],
+                            "Side": row["side"],
+                            "Entry": row["entry_time"],
+                            "Price": round(row["entry"], 2),
+                            "Stop": round(row["stop"], 2),
+                            "Basis": row["stop_basis"],
+                            "Target": round(row["target"], 2),
+                            "Exit": row["exit_time"],
+                            "Exit px": round(row["exit"], 2),
+                            "Why": row["exit_reason"],
+                            "Qty": row["qty"],
+                            "P&L": round(row["pnl"], 2),
+                            "R": round(row["r_multiple"], 2),
+                        }
+                        for row in report["trade_rows"]
+                    ],
+                    hide_index=True,
+                    use_container_width=True,
+                    height=420,
+                )
+            else:
+                st.caption("No trades.")
+        with days_tab:
+            st.dataframe(
+                [
+                    {
+                        "Date": row["date"],
+                        "Start": round(row["equity_start"], 2),
+                        "Sizing capital": round(row["sizing_capital"], 2),
+                        "Signals": row["signals"],
+                        "Trades": row["trades"],
+                        "P&L": round(row["pnl"], 2),
+                        "End": round(row["equity_end"], 2),
+                    }
+                    for row in report["daily_rows"]
+                ],
+                hide_index=True,
+                use_container_width=True,
+                height=420,
+            )
+        with skips_tab:
+            if report["skip_rows"]:
+                st.dataframe(
+                    [
+                        {
+                            "Date": row["date"],
+                            "Symbol": row["ticker"],
+                            "Side": row["side"],
+                            "Time": row["time"],
+                            "Entry": round(row["entry"], 2),
+                            "Reason": row["reason"],
+                        }
+                        for row in report["skip_rows"]
+                    ],
+                    hide_index=True,
+                    use_container_width=True,
+                    height=420,
+                )
+            else:
+                st.caption("No signals were skipped.")
