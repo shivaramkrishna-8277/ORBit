@@ -605,7 +605,7 @@ with tab_backtest:
         with trades_tab:
             rows = report["trade_rows"]
             if rows:
-                    from src.backtest.chart import exit_label, price_window, trade_candles, trade_levels
+                from src.backtest.chart import exit_label, price_window, trade_candles, trade_levels
 
                 reasons = sorted({row["exit_reason"] for row in rows})
                 symbols = sorted({row["ticker"] for row in rows})
