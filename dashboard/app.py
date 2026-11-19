@@ -95,91 +95,98 @@ def _persist_watchlist() -> None:
     update_watchlist(list(st.session_state.symbols))
 
 
-def _focus_search_input() -> None:
-    """Best-effort: focus the modal search box and select its text (Streamlit has no native API)."""
+def _focus_ticker_search() -> None:
+    """Focus the ticker search field (not the results table)."""
     components.html(
         """
         <script>
         const doc = window.parent.document;
         setTimeout(() => {
-          const nodes = doc.querySelectorAll('div[data-testid="stDialog"] input[type="text"]');
-          const el = nodes.length ? nodes[nodes.length - 1] : null;
+          let el = doc.querySelector('input[aria-label="Ticker search"]');
+          if (!el) {
+            const box = doc.getElementById("orb-ticker-search");
+            if (box) {
+              el = box.parentElement?.querySelector('input[type="text"]');
+            }
+          }
           if (el) {
             el.focus();
             el.select();
           }
-        }, 120);
+        }, 80);
         </script>
         """,
         height=0,
     )
 
 
-@st.dialog("Add symbols")
-def _add_symbols_dialog() -> None:
-    st.caption("Type a ticker or company name, pick a match, repeat. Saves when you click **Add to watchlist**.")
-    if "modal_staging" not in st.session_state:
-        st.session_state.modal_staging = []
-    if "modal_input_nonce" not in st.session_state:
-        st.session_state.modal_input_nonce = 0
+def _queue_symbol(sym: str) -> None:
+    if sym in st.session_state.symbols or sym in st.session_state.modal_staging:
+        return
+    st.session_state.modal_staging.append(sym)
+    st.session_state.modal_live_search = ""
+    st.session_state.modal_focus_search = True
 
+
+@st.fragment
+def _symbol_add_panel() -> None:
     if st.session_state.pop("modal_focus_search", False):
-        _focus_search_input()
+        _focus_ticker_search()
 
-    query = st.text_input(
-        "Search",
-        key=f"modal_search_{st.session_state.modal_input_nonce}",
-        placeholder="e.g. TCS, reliance, sbi",
+    st.markdown('<span id="orb-ticker-search"></span>', unsafe_allow_html=True)
+    st.text_input(
+        "Ticker search",
+        key="modal_live_search",
+        placeholder="Type ticker or company — results update as you type",
         label_visibility="collapsed",
-    ).strip()
+    )
+    query = (st.session_state.get("modal_live_search") or "").strip()
 
     hits: list[dict] = []
     if len(query) >= 2:
         master = _ensure_sym_master()
         if master is not None:
-            hits = search_nse_equity(query, master=master, limit=25)
+            hits = search_nse_equity(query, master=master, limit=30)
 
-    labels = {
-        h["symbol"]: f"{h['ticker']} — {h['name']}" if h.get("name") else h["symbol"]
-        for h in hits
-    }
-
-    def _on_pick() -> None:
-        sym = st.session_state.modal_match_pick
-        if not sym or sym == "":
-            return
-        on_list = sym in st.session_state.symbols or sym in st.session_state.modal_staging
-        if not on_list:
-            st.session_state.modal_staging.append(sym)
-        st.session_state.modal_input_nonce += 1
-        st.session_state.modal_match_pick = ""
-        st.session_state.modal_focus_search = True
-
-    pick_options = [""] + [h["symbol"] for h in hits]
-    st.selectbox(
-        "Matches",
-        options=pick_options,
-        format_func=lambda s: "Pick a symbol…" if not s else labels.get(s, s),
-        key="modal_match_pick",
-        on_change=_on_pick,
-        label_visibility="visible",
-    )
-
-    if len(query) >= 2 and not hits:
+    if hits:
+        head = st.columns([1, 4])
+        head[0].markdown("**Ticker**")
+        head[1].markdown("**Company**")
+        with st.container(height=min(300, 44 * len(hits))):
+            for h in hits:
+                sym = h["symbol"]
+                on_watch = sym in st.session_state.symbols
+                on_queue = sym in st.session_state.modal_staging
+                name = (h.get("name") or "")[:56]
+                if on_watch:
+                    suffix = " (already on list)"
+                elif on_queue:
+                    suffix = " (queued)"
+                else:
+                    suffix = ""
+                row_label = f"{h['ticker']:<10}  {name}{suffix}"
+                if st.button(
+                    row_label,
+                    key=f"pick_{sym}",
+                    disabled=on_watch or on_queue,
+                    use_container_width=True,
+                ):
+                    _queue_symbol(sym)
+                    st.rerun(scope="fragment")
+    elif len(query) >= 2:
         st.caption("No NSE EQ matches.")
 
     if st.session_state.modal_staging:
-        shown = ", ".join(_ticker(s) for s in st.session_state.modal_staging)
-        st.info(f"Queued: {shown}")
+        st.info("Queued: " + ", ".join(_ticker(s) for s in st.session_state.modal_staging))
 
     with st.expander("Paste many tickers"):
         bulk = st.text_area(
-            "One per line or spaces / commas",
-            height=80,
-            placeholder="RELIANCE TCS INFY",
+            "Paste",
+            height=72,
+            placeholder="RELIANCE, TCS INFY or one per line",
             label_visibility="collapsed",
         )
-        if st.button("Queue pasted tickers", disabled=not bulk.strip()):
+        if st.button("Queue pasted", disabled=not bulk.strip(), key="queue_bulk"):
             master = _ensure_sym_master()
             resolved, errors = _resolve_many(_parse_symbol_list(bulk), master)
             for sym in resolved:
@@ -188,22 +195,29 @@ def _add_symbols_dialog() -> None:
             if errors:
                 st.warning("Skipped: " + "; ".join(errors[:4]))
 
-    bar1, bar2, bar3 = st.columns(3)
-    with bar1:
-        if st.button("Add to watchlist", type="primary", disabled=not st.session_state.modal_staging):
+    b1, b2, b3 = st.columns(3)
+    with b1:
+        if st.button(
+            "Add to watchlist",
+            type="primary",
+            disabled=not st.session_state.modal_staging,
+            key="commit_staging",
+        ):
             _add_symbols_bulk(st.session_state.modal_staging)
             _persist_watchlist()
             st.session_state.modal_staging = []
+            st.session_state.add_symbols_open = False
             st.rerun()
-    with bar2:
-        if st.button("Add Nifty 50"):
+    with b2:
+        if st.button("Queue Nifty 50", key="queue_nifty"):
             for sym in NIFTY50_SYMBOLS:
                 if sym not in st.session_state.modal_staging and sym not in st.session_state.symbols:
                     st.session_state.modal_staging.append(sym)
-            st.rerun()
-    with bar3:
-        if st.button("Close"):
+            st.rerun(scope="fragment")
+    with b3:
+        if st.button("Cancel", key="cancel_add"):
             st.session_state.modal_staging = []
+            st.session_state.add_symbols_open = False
             st.rerun()
 
 
@@ -225,8 +239,12 @@ if "symbols" not in st.session_state:
     _load_symbols(settings)
 if "sym_master" not in st.session_state:
     st.session_state.sym_master = None
-if "modal_input_nonce" not in st.session_state:
-    st.session_state.modal_input_nonce = 0
+if "add_symbols_open" not in st.session_state:
+    st.session_state.add_symbols_open = False
+if "modal_staging" not in st.session_state:
+    st.session_state.modal_staging = []
+if "modal_live_search" not in st.session_state:
+    st.session_state.modal_live_search = ""
 
 today = datetime.now(IST).strftime("%Y-%m-%d")
 token_ok = is_token_valid()
@@ -252,13 +270,28 @@ with tab_list:
     head_l, head_r = st.columns([2, 3])
     with head_l:
         if st.button("Add symbols", type="primary", use_container_width=True):
+            st.session_state.add_symbols_open = True
             st.session_state.modal_staging = []
-            st.session_state.modal_input_nonce += 1
-            _add_symbols_dialog()
+            st.session_state.modal_live_search = ""
+            st.session_state.modal_focus_search = True
+            st.rerun()
     with head_r:
         if st.button("Reload watchlist from disk", use_container_width=True):
             _load_symbols(load_settings())
             st.rerun()
+
+    if st.session_state.add_symbols_open:
+        with st.container(border=True):
+            t1, t2 = st.columns([8, 1])
+            with t1:
+                st.subheader("Add symbols")
+                st.caption("Results refresh on every keystroke — click a row, then keep typing the next name.")
+            with t2:
+                if st.button("✕", key="close_add_panel"):
+                    st.session_state.add_symbols_open = False
+                    st.session_state.modal_staging = []
+                    st.rerun()
+            _symbol_add_panel()
 
     st.divider()
     st.subheader(f"On your list ({len(st.session_state.symbols)})")
