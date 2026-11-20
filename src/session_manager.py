@@ -289,7 +289,12 @@ class SessionManager:
                 signal["recalc"] = True
             self._on_breakout(signal)
 
-        detector = BreakoutDetector(orb_levels=passed, on_breakout_callback=_on_signal)
+        detector = BreakoutDetector(
+            orb_levels=passed,
+            on_breakout_callback=_on_signal,
+            breakout_minutes=settings.breakout_timeframe_minutes,
+            entry_cutoff=settings.entry_cutoff,
+        )
         sent = 0
         if rescan:
             for symbol, candles in replay.items():

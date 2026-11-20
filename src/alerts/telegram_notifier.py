@@ -159,7 +159,8 @@ class TelegramNotifier:
         if settings is not None:
             window = (
                 f"Window: 09:15–{settings.orb_end_label} ({settings.orb_duration_minutes} min). "
-                f"Breakout candles: {settings.breakout_timeframe_minutes} min.\n"
+                f"Breakout candles: {settings.breakout_timeframe_minutes} min. "
+                f"No entry after {getattr(settings, 'entry_cutoff', '15:15')}.\n"
             )
         msg = (
             f"{title}\n"

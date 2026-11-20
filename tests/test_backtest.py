@@ -161,6 +161,19 @@ def test_cached_days_are_not_downloaded_again():
     ]
 
 
+def test_breakout_after_cutoff_is_not_taken():
+    blocked = _run(
+        {"NSE:AAA-EQ": _session(101.0, 400, next_low=100.5, next_high=110.0)},
+        entry_cutoff="09:30",
+    )
+    assert blocked["trades"] == 0
+    allowed = _run(
+        {"NSE:AAA-EQ": _session(101.0, 400, next_low=100.5, next_high=110.0)},
+        entry_cutoff="09:35",
+    )
+    assert allowed["trades"] == 1
+
+
 def test_volume_interest_uses_every_prior_breakout_candle():
     interested, ratio = volume_interest(300, [100, 100, 100, 100])
     assert interested is True

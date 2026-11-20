@@ -9,7 +9,7 @@ import pytz
 from src.backtest.rank import rank_signals, volume_interest
 from src.strategy.intraday_agg import closed_breakout_candles, opening_range_candle, session_end
 from src.strategy.structure_sl import suggest_stop_loss
-from src.utils.orb_math import orb_range_pct, range_passes
+from src.utils.orb_math import entry_is_allowed, orb_range_pct, range_passes
 
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -83,6 +83,7 @@ def _signals_for_symbol(
     max_stock_price: float,
     orb_range_threshold: float,
     orb_range_mode: str,
+    entry_cutoff: str,
     rrr: float,
 ) -> tuple[dict | None, list[dict]]:
     """First breakout of the day, plus the breakout-timeframe candles used to manage it."""
@@ -116,6 +117,8 @@ def _signals_for_symbol(
         if distance <= 0:
             prior.append(candle)
             continue
+        if not entry_is_allowed(candle["candle_start"], breakout_minutes, entry_cutoff):
+            return None, candles
         target = close + rrr * distance if side == "BULLISH" else close - rrr * distance
         interested, ratio = volume_interest(
             float(candle.get("volume") or 0),
@@ -158,6 +161,7 @@ def simulate_day(
     max_stock_price: float,
     orb_range_threshold: float,
     orb_range_mode: str = "lte",
+    entry_cutoff: str = "15:15",
 ) -> dict:
     """Simulate one session. Sizing capital is already capped by the caller."""
     day_dt = IST.localize(datetime(day.year, day.month, day.day, 9, 15))
@@ -180,6 +184,7 @@ def simulate_day(
             max_stock_price=max_stock_price,
             orb_range_threshold=orb_range_threshold,
             orb_range_mode=orb_range_mode,
+            entry_cutoff=entry_cutoff,
             rrr=rrr,
         )
         candles_by_symbol[symbol] = {c["candle_start"]: c for c in candles}

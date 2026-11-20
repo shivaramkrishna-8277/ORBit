@@ -1,6 +1,6 @@
 """ORB control panel. Settings are stored in the same SQLite file the bot reads."""
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, time as dtime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -33,6 +33,11 @@ IST = pytz.timezone("Asia/Kolkata")
 
 def _ticker(symbol: str) -> str:
     return symbol.replace("NSE:", "").replace("-EQ", "")
+
+
+def _cutoff_value(value: str) -> dtime:
+    hour, minute = (value or "15:15").split(":")
+    return dtime(int(hour), int(minute))
 
 
 def _end_label(minutes: int) -> str:
@@ -375,6 +380,11 @@ with tab_rules:
                 index=list(BREAKOUT_TIMEFRAMES).index(settings.breakout_timeframe_minutes),
                 format_func=lambda m: f"{m} minutes",
             )
+            cutoff = st.time_input(
+                "No entry after",
+                value=_cutoff_value(settings.entry_cutoff),
+                step=timedelta(minutes=5),
+            )
 
         st.divider()
         st.subheader("Actions")
@@ -400,6 +410,7 @@ with tab_rules:
             orb_range_mode=range_mode,
             orb_duration_minutes=int(duration),
             breakout_timeframe_minutes=int(timeframe),
+            entry_cutoff=cutoff.strftime("%H:%M"),
         )
 
     if save:
@@ -547,6 +558,12 @@ with tab_backtest:
                 index=list(BREAKOUT_TIMEFRAMES).index(settings.breakout_timeframe_minutes),
                 format_func=lambda m: f"{m} minutes",
             )
+            bt_cutoff = st.time_input(
+                "No entry after",
+                value=_cutoff_value(settings.entry_cutoff),
+                step=timedelta(minutes=5),
+                key="bt_entry_cutoff",
+            )
         run_bt = st.form_submit_button("Run backtest", type="primary")
 
     if run_bt:
@@ -567,6 +584,7 @@ with tab_backtest:
                 orb_range_mode=bt_range_mode,
                 orb_duration_minutes=int(bt_duration),
                 breakout_timeframe_minutes=int(bt_timeframe),
+                entry_cutoff=bt_cutoff.strftime("%H:%M"),
                 max_price_enabled=bool(bt_price_on),
                 max_stock_price=float(bt_max_price),
                 capital=float(bt_capital),

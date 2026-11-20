@@ -101,6 +101,7 @@ _DDL = [
         max_stock_price              REAL    NOT NULL,
         orb_range_threshold          REAL    NOT NULL,
         orb_range_mode               TEXT    NOT NULL DEFAULT 'lte',
+        entry_cutoff                 TEXT    NOT NULL DEFAULT '15:15',
         orb_duration_minutes         INTEGER NOT NULL,
         breakout_timeframe_minutes   INTEGER NOT NULL,
         updated_at                   TEXT    NOT NULL
@@ -124,6 +125,10 @@ def _migrate_settings_columns(con: sqlite3.Connection) -> None:
     if "orb_range_mode" not in existing:
         con.execute(
             "ALTER TABLE strategy_settings ADD COLUMN orb_range_mode TEXT NOT NULL DEFAULT 'lte'"
+        )
+    if "entry_cutoff" not in existing:
+        con.execute(
+            "ALTER TABLE strategy_settings ADD COLUMN entry_cutoff TEXT NOT NULL DEFAULT '15:15'"
         )
 
 
@@ -334,20 +339,22 @@ def save_strategy_settings(
     breakout_timeframe_minutes: int,
     updated_at: str,
     orb_range_mode: str = "lte",
+    entry_cutoff: str = "15:15",
 ) -> None:
     with _conn() as con:
         con.execute(
             """INSERT INTO strategy_settings (
                    id, symbols_json, max_price_enabled, max_stock_price,
-                   orb_range_threshold, orb_range_mode, orb_duration_minutes,
+                   orb_range_threshold, orb_range_mode, entry_cutoff, orb_duration_minutes,
                    breakout_timeframe_minutes, updated_at
-               ) VALUES (1,?,?,?,?,?,?,?,?)
+               ) VALUES (1,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                    symbols_json=excluded.symbols_json,
                    max_price_enabled=excluded.max_price_enabled,
                    max_stock_price=excluded.max_stock_price,
                    orb_range_threshold=excluded.orb_range_threshold,
                    orb_range_mode=excluded.orb_range_mode,
+                   entry_cutoff=excluded.entry_cutoff,
                    orb_duration_minutes=excluded.orb_duration_minutes,
                    breakout_timeframe_minutes=excluded.breakout_timeframe_minutes,
                    updated_at=excluded.updated_at""",
@@ -357,6 +364,7 @@ def save_strategy_settings(
                 max_stock_price,
                 orb_range_threshold,
                 orb_range_mode,
+                entry_cutoff,
                 orb_duration_minutes,
                 breakout_timeframe_minutes,
                 updated_at,

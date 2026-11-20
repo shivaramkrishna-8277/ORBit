@@ -6,6 +6,7 @@ from typing import Callable
 import pytz
 
 from src.strategy.structure_sl import suggest_stop_loss
+from src.utils.orb_math import entry_is_allowed
 from src.utils import db
 from src.utils.logger import get_logger
 
@@ -25,9 +26,18 @@ class BreakoutDetector:
                           suggested_sl, orb_stop, stop_basis, ...}
     """
 
-    def __init__(self, orb_levels: dict[str, dict], on_breakout_callback: Callable):
+    def __init__(
+        self,
+        orb_levels: dict[str, dict],
+        on_breakout_callback: Callable,
+        *,
+        breakout_minutes: int = 15,
+        entry_cutoff: str = "15:15",
+    ):
         self._orb = orb_levels
         self._callback = on_breakout_callback
+        self._breakout_minutes = breakout_minutes
+        self._entry_cutoff = entry_cutoff
         self._prior_candles: dict[str, list[dict]] = defaultdict(list)
 
     def check_candle(self, symbol: str, candle: dict) -> None:
@@ -54,6 +64,10 @@ class BreakoutDetector:
         orb_high = self._orb[symbol]["orb_high"]
         orb_low = self._orb[symbol]["orb_low"]
         prior = list(self._prior_candles[symbol])
+        too_late = (
+            isinstance(candle.get("candle_start"), datetime)
+            and not entry_is_allowed(candle["candle_start"], self._breakout_minutes, self._entry_cutoff)
+        )
 
         def _emit(signal_type: str, orb_level: float, move_pct: float) -> None:
             sl = suggest_stop_loss(
@@ -92,7 +106,9 @@ class BreakoutDetector:
             self._callback(signal)
 
         # ── BULLISH ──────────────────────────────────────────────────────────
-        if close > orb_high:
+        if too_late:
+            logger.info("Skipped %s — breakout close is after the %s entry cutoff.", symbol, self._entry_cutoff)
+        elif close > orb_high:
             if not db.has_signal_fired(today, symbol, "BULLISH") and \
                     not db.has_signal_fired(today, symbol, "BEARISH"):
                 move_pct = (close - orb_high) / orb_high * 100
