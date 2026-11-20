@@ -554,6 +554,58 @@ with tab_day:
 
     _live_status()
 
+def _run_combination_sheet(data: bytes, replace_filled: bool, progress) -> bytes:
+    """Run Stage1_Direct and Stage1B_Retest. Each month starts at ₹1,00,000."""
+    from src.backtest.history import load_watchlist_minutes, merge_bar_store, range_is_cached, slice_bars
+    from src.backtest.sheet_batch import fill_workbook, run_setup_months, sheet_windows
+    from src.broker.auth import get_access_token
+    from src.broker.fyers_client import get_client
+
+    windows = sheet_windows(datetime.now(IST).date())
+    if not windows:
+        raise ValueError("2026 has not started, so there are no months to fill.")
+    token = get_access_token(allow_oauth=False)
+    client = get_client(token)
+    loaded: dict[str, tuple[list[str], dict]] = {}
+
+    def _bars(universe: str):
+        if universe in loaded:
+            return loaded[universe]
+        symbols = list(st.session_state.index_symbols if universe == "indices" else st.session_state.symbols)
+        if not symbols:
+            label = "index list" if universe == "indices" else "equity watchlist"
+            raise ValueError(f"The {label} is empty.")
+        start, end = windows[0][0], windows[-1][1]
+        store = st.session_state.get("bt_hist_store")
+        if range_is_cached(store, symbols, start, end):
+            progress("Using cached history. No download.")
+            bars = slice_bars(store["bars"], start, end)
+        else:
+            bars = load_watchlist_minutes(client, symbols, start, end, progress=progress)
+            st.session_state.bt_hist_store = merge_bar_store(store, symbols, start, end, bars)
+        loaded[universe] = (symbols, bars)
+        return loaded[universe]
+
+    def _run(setup):
+        symbols, bars = _bars(setup.universe)
+        return run_setup_months(setup, symbols, windows, bars)
+
+    checkpoint_path = ROOT / "data" / "sheet_runs" / "stage1_filled.xlsx"
+
+    def _checkpoint(payload: bytes) -> None:
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint_path.write_bytes(payload)
+        st.session_state.sheet_batch_bytes = payload
+        st.session_state.sheet_batch_note = "Progress is saved in the download. Upload that file again to continue."
+
+    payload, done, skipped = fill_workbook(
+        data, _run, progress=progress, replace_filled=replace_filled, checkpoint=_checkpoint
+    )
+    st.session_state.sheet_batch_bytes = payload
+    st.session_state.sheet_batch_note = f"Filled {done} setups. Left {skipped} that already had January."
+    return payload
+
+
 # ── Backtest ───────────────────────────────────────────────────────────────────
 
 with tab_backtest:
@@ -1003,3 +1055,38 @@ with tab_backtest:
                 )
             else:
                 st.caption("No signals were skipped.")
+
+    st.divider()
+    st.subheader("Combination sheet")
+    st.caption(
+        "Upload the backtest workbook. Stage1_Direct and Stage1B_Retest are filled for January–November 2026, "
+        "each month starting again at ₹1,00,000. Capital, margin 5×, reward:risk 2, no entry after 11:59, and the price filter off "
+        "come from the sheet. Total P&L, profitable months, worst month, and win rate stay as formulas. "
+        "A finished row is skipped, so you can upload the same file again to continue."
+    )
+    sheet_file = st.file_uploader("Workbook", type=["xlsx"], key="bt_sheet_upload")
+    replace_sheet = st.checkbox("Replace rows that already have January filled")
+    if st.button("Run every setup in the sheet", type="primary", disabled=sheet_file is None):
+        if not is_token_valid():
+            st.error("Fyers token is missing. Use Strategy → Telegram: new Fyers login, then run again.")
+        else:
+            try:
+                with st.status("Running the sheet…", expanded=True) as status:
+                    note = st.empty()
+                    _run_combination_sheet(sheet_file.getvalue(), replace_sheet, note.write)
+                    status.update(label="Sheet finished", state="complete")
+            except Exception as exc:
+                st.error(str(exc))
+    saved_sheet = ROOT / "data" / "sheet_runs" / "stage1_filled.xlsx"
+    if not st.session_state.get("sheet_batch_bytes") and saved_sheet.exists():
+        st.session_state.sheet_batch_bytes = saved_sheet.read_bytes()
+        st.session_state.sheet_batch_note = "This is the last saved sheet. Rows with January filled are already done."
+    if st.session_state.get("sheet_batch_note"):
+        st.caption(st.session_state.sheet_batch_note)
+    if st.session_state.get("sheet_batch_bytes"):
+        st.download_button(
+            "Download filled workbook",
+            data=st.session_state.sheet_batch_bytes,
+            file_name="stage1_filled.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
