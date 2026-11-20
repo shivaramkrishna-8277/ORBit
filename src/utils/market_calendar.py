@@ -38,20 +38,21 @@ _HOLIDAYS: dict[str, str] = {
     "2025-12-25": "Christmas",
 
     # ── 2026 ──────────────────────────────────────────────────────────────────
+    # NSE/CMTR/71775, 12 Dec 2025. Weekend holidays are omitted.
     "2026-01-26": "Republic Day",
     "2026-03-03": "Holi",
-    "2026-03-20": "Id-ul-Fitr (Ramzan Eid)",
-    "2026-03-30": "Shri Ram Navami",
-    "2026-04-02": "Dr. Baba Saheb Ambedkar Jayanti (observed)",
+    "2026-03-26": "Shri Ram Navami",
+    "2026-03-31": "Shri Mahavir Jayanti",
     "2026-04-03": "Good Friday",
+    "2026-04-14": "Dr. Baba Saheb Ambedkar Jayanti",
     "2026-05-01": "Maharashtra Day",
-    "2026-08-15": "Independence Day",
-    "2026-09-16": "Ganesh Chaturthi",
-    "2026-10-02": "Gandhi Jayanti",
-    "2026-10-08": "Dussehra",
-    "2026-11-09": "Diwali — Laxmi Puja",
+    "2026-05-28": "Bakri Id",
+    "2026-06-26": "Muharram",
+    "2026-09-14": "Ganesh Chaturthi",
+    "2026-10-02": "Mahatma Gandhi Jayanti",
+    "2026-10-20": "Dussehra",
     "2026-11-10": "Diwali — Balipratipada",
-    "2026-11-24": "Prakash Gurpurb Sri Guru Nanak Dev Ji",
+    "2026-11-24": "Prakash Gurpurb Sri Guru Nanak Dev",
     "2026-12-25": "Christmas",
 }
 

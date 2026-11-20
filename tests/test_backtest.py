@@ -298,6 +298,24 @@ def test_include_months_skips_sessions_outside_the_selection(monkeypatch):
     assert report["daily_rows"][0]["date"] == "2026-01-05"
 
 
+def test_2026_closed_days_are_not_requested():
+    from src.utils.market_calendar import trading_days
+
+    closed = {
+        date(2026, 3, 26),
+        date(2026, 3, 31),
+        date(2026, 4, 14),
+        date(2026, 5, 28),
+        date(2026, 6, 26),
+        date(2026, 9, 14),
+        date(2026, 10, 20),
+    }
+    days = set(trading_days(date(2026, 1, 1), date(2026, 11, 20)))
+    assert closed.isdisjoint(days)
+    assert date(2026, 4, 2) in days
+    assert date(2026, 9, 16) in days
+
+
 def test_month_window_stops_at_today_and_skips_a_future_month():
     from src.backtest.months import month_window
 

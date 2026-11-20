@@ -21,6 +21,7 @@ logger = get_logger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
 _MAX_RETRIES = 3
 _RETRY_DELAY = 1  # seconds
+_RATE_LIMIT_WAIT = 65  # Fyers Standard plan allows 50 history calls a minute
 
 
 # ── Client factory ────────────────────────────────────────────────────────────
@@ -36,8 +37,26 @@ def get_client(access_token: str) -> FyersModel:
 
 # ── API helpers ───────────────────────────────────────────────────────────────
 
+def _no_session(response) -> bool:
+    """True when Fyers accepted the call but the session has no candles."""
+    if not isinstance(response, dict):
+        return False
+    if response.get("s") == "no_data":
+        return True
+    message = str(response.get("message") or "").strip()
+    return response.get("code") == 200 and message == "" and not response.get("candles")
+
+
+def _rate_limited(response) -> bool:
+    if not isinstance(response, dict):
+        return False
+    message = str(response.get("message") or "")
+    return response.get("code") == -360 or "requests/minute" in message
+
+
 def _call_with_retry(fn, *args, **kwargs):
-    """Call fn(*args, **kwargs); retry up to _MAX_RETRIES times on rate-limit errors."""
+    """Call fn(*args, **kwargs); back off on the per-minute limit, and do not retry an empty session."""
+    response = None
     for attempt in range(1, _MAX_RETRIES + 1):
         t0 = time.perf_counter()
         response = fn(*args, **kwargs)
@@ -45,17 +64,17 @@ def _call_with_retry(fn, *args, **kwargs):
         logger.debug("API call took %.0f ms (attempt %d)", elapsed, attempt)
 
         status = response.get("s") if isinstance(response, dict) else None
-        if status == "ok":
+        if status == "ok" or _no_session(response):
             return response
 
-        # Rate-limit or server error — retry after delay
-        code = response.get("code", "")
-        msg = response.get("message", response)
-        if attempt < _MAX_RETRIES:
-            logger.warning("API error (attempt %d/%d): %s — retrying in %ds", attempt, _MAX_RETRIES, msg, _RETRY_DELAY)
-            time.sleep(_RETRY_DELAY)
-        else:
+        code = response.get("code", "") if isinstance(response, dict) else ""
+        msg = response.get("message", response) if isinstance(response, dict) else response
+        if attempt >= _MAX_RETRIES:
             logger.error("API call failed after %d attempts: code=%s msg=%s", _MAX_RETRIES, code, msg)
+            break
+        wait = _RATE_LIMIT_WAIT if _rate_limited(response) else _RETRY_DELAY
+        logger.warning("API error (attempt %d/%d): %s — retrying in %ds", attempt, _MAX_RETRIES, msg, wait)
+        time.sleep(wait)
 
     return response
 
@@ -142,6 +161,9 @@ def fetch_historical_candles(
     }
     response = _call_with_retry(client.history, payload)
     empty = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
+    if _no_session(response):
+        logger.info("history() has no bars for %s %s–%s", symbol, date_from, date_to)
+        return empty, True
     if not isinstance(response, dict) or response.get("s") != "ok":
         message = response.get("message", response) if isinstance(response, dict) else response
         logger.warning("history() failed for %s: %s", symbol, message)
