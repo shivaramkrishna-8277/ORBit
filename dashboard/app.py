@@ -556,8 +556,13 @@ with tab_day:
 
 def _run_combination_sheet(data: bytes, replace_filled: bool, progress) -> bytes:
     """Run Stage1_Direct and Stage1B_Retest. Each month starts at ₹1,00,000."""
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
     from src.backtest.history import load_watchlist_minutes, merge_bar_store, range_is_cached, slice_bars
-    from src.backtest.sheet_batch import fill_workbook, run_setup_months, sheet_windows
+    from src.backtest.sheet_batch import fill_workbook, needed_universes, sheet_windows
+    from src.backtest.sheet_fast import iter_sheet_results
     from src.broker.auth import get_access_token
     from src.broker.fyers_client import get_client
 
@@ -566,11 +571,9 @@ def _run_combination_sheet(data: bytes, replace_filled: bool, progress) -> bytes
         raise ValueError("2026 has not started, so there are no months to fill.")
     token = get_access_token(allow_oauth=False)
     client = get_client(token)
-    loaded: dict[str, tuple[list[str], dict]] = {}
-
-    def _bars(universe: str):
-        if universe in loaded:
-            return loaded[universe]
+    needed = needed_universes(load_workbook(BytesIO(data)), replace_filled)
+    bars_by_universe: dict[str, dict] = {}
+    for universe in sorted(needed):
         symbols = list(st.session_state.index_symbols if universe == "indices" else st.session_state.symbols)
         if not symbols:
             label = "index list" if universe == "indices" else "equity watchlist"
@@ -578,17 +581,15 @@ def _run_combination_sheet(data: bytes, replace_filled: bool, progress) -> bytes
         start, end = windows[0][0], windows[-1][1]
         store = st.session_state.get("bt_hist_store")
         if range_is_cached(store, symbols, start, end):
-            progress("Using cached history. No download.")
+            progress(f"Using cached {universe} history. No download.")
             bars = slice_bars(store["bars"], start, end)
         else:
             bars = load_watchlist_minutes(client, symbols, start, end, progress=progress)
             st.session_state.bt_hist_store = merge_bar_store(store, symbols, start, end, bars)
-        loaded[universe] = (symbols, bars)
-        return loaded[universe]
+        bars_by_universe[universe] = bars
 
-    def _run(setup):
-        symbols, bars = _bars(setup.universe)
-        return run_setup_months(setup, symbols, windows, bars)
+    def _run_many(pending):
+        return iter_sheet_results(pending, bars_by_universe, windows, progress)
 
     checkpoint_path = ROOT / "data" / "sheet_runs" / "stage1_filled.xlsx"
 
@@ -599,7 +600,11 @@ def _run_combination_sheet(data: bytes, replace_filled: bool, progress) -> bytes
         st.session_state.sheet_batch_note = "Progress is saved in the download. Upload that file again to continue."
 
     payload, done, skipped = fill_workbook(
-        data, _run, progress=progress, replace_filled=replace_filled, checkpoint=_checkpoint
+        data,
+        progress=progress,
+        replace_filled=replace_filled,
+        checkpoint=_checkpoint,
+        run_many=_run_many,
     )
     st.session_state.sheet_batch_bytes = payload
     st.session_state.sheet_batch_note = f"Filled {done} setups. Left {skipped} that already had January."

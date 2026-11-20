@@ -220,12 +220,23 @@ def write_results(ws, headers: dict[str, int], row: int, results: list[MonthResu
     ws.cell(row, headers["Worst Max DD"]).value = round(max((result.max_drawdown for result in results), default=0.0), 2)
 
 
+def needed_universes(workbook, replace_filled: bool) -> set[str]:
+    """Symbol lists still required. A row with January filled is skipped unless replace is on."""
+    needed: set[str] = set()
+    for setup in read_setups(workbook):
+        ws = workbook[setup.sheet]
+        if replace_filled or not _filled(ws, _headers(ws), setup.row):
+            needed.add(setup.universe)
+    return needed
+
+
 def fill_workbook(
     data: bytes,
-    run_one,
+    run_one=None,
     progress=None,
     replace_filled: bool = False,
     checkpoint=None,
+    run_many=None,
 ) -> tuple[bytes, int, int]:
     """
     Run every Stage1_Direct and Stage1B_Retest row.
@@ -242,6 +253,7 @@ def fill_workbook(
         raise ValueError("Those sheets have no setups to run.")
     done = 0
     skipped = 0
+    pending = []
     for index, setup in enumerate(setups, start=1):
         ws = workbook[setup.sheet]
         headers = _headers(ws)
@@ -250,15 +262,26 @@ def fill_workbook(
             if progress:
                 progress(f"Skipped {setup.setup_id} ({index}/{len(setups)}), January is already filled.")
             continue
-        if progress:
-            progress(f"Running {setup.setup_id} ({index}/{len(setups)})")
-        results = list(run_one(setup))
-        write_results(ws, headers, setup.row, results)
+        pending.append(setup)
+
+    def _write(setup: SheetSetup, results) -> None:
+        nonlocal done
+        write_results(workbook[setup.sheet], _headers(workbook[setup.sheet]), setup.row, list(results))
         done += 1
-        if checkpoint:
+        if checkpoint and (done % 10 == 0 or done == len(pending)):
             snapshot = BytesIO()
             workbook.save(snapshot)
             checkpoint(snapshot.getvalue())
+
+    if run_many is not None:
+        by_id = {setup.setup_id: setup for setup in pending}
+        for setup_id, results in run_many(pending):
+            _write(by_id[setup_id], results)
+    else:
+        for setup in pending:
+            if progress:
+                progress(f"Running {setup.setup_id}")
+            _write(setup, run_one(setup))
     buffer = BytesIO()
     workbook.save(buffer)
     return buffer.getvalue(), done, skipped

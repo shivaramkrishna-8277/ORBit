@@ -83,6 +83,45 @@ def test_sheet_windows_cover_january_through_november_and_clip_the_current_month
     assert sheet_windows(date(2025, 12, 31)) == []
 
 
+def test_fast_sheet_matches_the_month_by_month_run():
+    from src.backtest.sheet_batch import SheetSetup, run_setup_months
+    from src.backtest.sheet_fast import _month_result, _prepare_day
+    from tests.test_backtest import DAY, _session
+
+    bars = {"NSE:AAA-EQ": _session(101.0, 400, next_low=100.5, next_high=110.0)}
+    window = (DAY, DAY)
+    prepared = {DAY: _prepare_day(bars, DAY, 5, 5)}
+
+    def _check(entry_mode: str, window_minutes: int) -> None:
+        setup = SheetSetup(
+            sheet="Stage1_Direct",
+            row=2,
+            setup_id="D-001",
+            entry_mode=entry_mode,
+            retest_within_minutes=window_minutes,
+            universe="watchlist",
+            orb_minutes=5,
+            breakout_minutes=5,
+            orb_range_threshold=5.0,
+            orb_range_mode="lte",
+            risk_pct=1,
+            day_risk_pct=3,
+            max_trades=2,
+        )
+        slow = run_setup_months(setup, ["NSE:AAA-EQ"], [window], bars)[0]
+        fast = _month_result(setup, prepared, DAY, DAY)
+        assert (fast.gross_pnl, fast.trades, fast.wins, fast.losses, round(fast.max_drawdown, 2)) == (
+            slow.gross_pnl,
+            slow.trades,
+            slow.wins,
+            slow.losses,
+            round(slow.max_drawdown, 2),
+        )
+
+    _check("direct", 30)
+    _check("retest", 30)
+
+
 def test_real_stage_file_parses_both_sheets():
     from pathlib import Path
 

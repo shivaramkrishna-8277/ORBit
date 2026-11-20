@@ -108,6 +108,33 @@ def _signals_for_symbol(
     candles = closed_breakout_candles(
         minute_bars, day, orb_minutes, breakout_minutes, session_end(day)
     )
+    signal = _signal_from_candles(
+        symbol,
+        orb,
+        candles,
+        breakout_minutes=breakout_minutes,
+        entry_cutoff=entry_cutoff,
+        entry_mode=entry_mode,
+        retest_within_minutes=retest_within_minutes,
+        rrr=rrr,
+        range_pct=range_pct,
+    )
+    return signal, candles
+
+
+def _signal_from_candles(
+    symbol: str,
+    orb: dict,
+    candles: list[dict],
+    *,
+    breakout_minutes: int,
+    entry_cutoff: str,
+    entry_mode: str,
+    retest_within_minutes: int,
+    rrr: float,
+    range_pct: float,
+) -> dict | None:
+    """Entry signal from candles that are already built. The range filter is the caller's job."""
     chosen: dict | None = None
     if entry_mode == "retest":
         chosen = find_retest_candle(
@@ -138,7 +165,7 @@ def _signals_for_symbol(
             prior.append(candle)
             continue
         if not entry_is_allowed(candle["candle_start"], breakout_minutes, entry_cutoff):
-            return None, candles
+            return None
         target = close + rrr * distance if side == "BULLISH" else close - rrr * distance
         interested, ratio = volume_interest(
             float(candle.get("volume") or 0),
@@ -161,8 +188,8 @@ def _signals_for_symbol(
             "orb_high": float(orb["high"]),
             "orb_low": float(orb["low"]),
         }
-        return signal, candles
-    return None, candles
+        return signal
+    return None
 
 
 def simulate_day(
@@ -215,6 +242,36 @@ def simulate_day(
         if signal is not None:
             signals.append(signal)
 
+    return manage_day(
+        day,
+        day_dt,
+        signals,
+        candles_by_symbol,
+        minutes_by_symbol,
+        sizing_capital=sizing_capital,
+        margin_multiplier=margin_multiplier,
+        risk_pct=risk_pct,
+        day_risk_pct=day_risk_pct,
+        max_trades=max_trades,
+        breakout_minutes=breakout_minutes,
+    )
+
+
+def manage_day(
+    day: date,
+    day_dt: datetime,
+    signals: list[dict],
+    candles_by_symbol: dict[str, dict],
+    minutes_by_symbol: dict[str, list[dict]],
+    *,
+    sizing_capital: float,
+    margin_multiplier: float,
+    risk_pct: float,
+    day_risk_pct: float,
+    max_trades: int,
+    breakout_minutes: int,
+) -> dict:
+    """Turn ready signals into trades. Exits use the breakout candles, then the 15:15 close."""
     buying_power = sizing_capital * margin_multiplier
     day_risk_limit = sizing_capital * (day_risk_pct / 100.0)
     times = sorted({sig["candle_start"] for sig in signals})
