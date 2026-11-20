@@ -47,7 +47,7 @@ def _fmt_full(n: float) -> str:
 
 
 def _short_symbol(symbol: str) -> str:
-    return symbol.replace("NSE:", "").replace("-EQ", "")
+    return symbol.replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
 
 
 def _today() -> str:

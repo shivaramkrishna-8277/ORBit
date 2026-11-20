@@ -294,6 +294,8 @@ class SessionManager:
             on_breakout_callback=_on_signal,
             breakout_minutes=settings.breakout_timeframe_minutes,
             entry_cutoff=settings.entry_cutoff,
+            track_retest=settings.track_retest,
+            retest_within_minutes=settings.retest_within_minutes,
         )
         sent = 0
         if rescan:

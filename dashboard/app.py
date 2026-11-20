@@ -18,21 +18,28 @@ from src.strategy.runtime_settings import (
     BREAKOUT_TIMEFRAMES,
     ORB_DURATIONS,
     RANGE_MODES,
+    RETEST_WINDOWS,
     StrategySettings,
     enqueue_fyers_auth,
     enqueue_recalc,
     load_settings,
     normalize_symbol,
     save_settings,
+    update_index_symbols,
     update_watchlist,
 )
+from src.strategy.indices import INDEX_CATALOG, index_label
 from src.utils import db
 
 IST = pytz.timezone("Asia/Kolkata")
 
 
 def _ticker(symbol: str) -> str:
-    return symbol.replace("NSE:", "").replace("-EQ", "")
+    text = symbol.replace("NSE:", "")
+    for suffix in ("-EQ", "-INDEX"):
+        if text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
 
 
 def _cutoff_value(value: str) -> dtime:
@@ -56,6 +63,7 @@ def _range_mode_label(mode: str) -> str:
 
 def _load_symbols(settings: StrategySettings) -> None:
     st.session_state.symbols = list(settings.symbols)
+    st.session_state.index_symbols = list(settings.index_symbols or [])
 
 
 def _ensure_sym_master() -> dict | None:
@@ -258,6 +266,8 @@ settings = load_settings()
 
 if "symbols" not in st.session_state:
     _load_symbols(settings)
+if "index_symbols" not in st.session_state:
+    st.session_state.index_symbols = list(settings.index_symbols or [])
 if "sym_master" not in st.session_state:
     st.session_state.sym_master = None
 if "add_symbols_open" not in st.session_state:
@@ -276,7 +286,7 @@ qualified = sum(1 for r in _day_rows if r["passed_filter"])
 
 st.title("ORB control")
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Tracking", len(st.session_state.symbols))
+m1.metric("Tracking", len(st.session_state.symbols) + len(st.session_state.get("index_symbols") or []))
 m2.metric("Fyers token", "OK" if token_ok else "Login needed")
 m3.metric("Qualified today", qualified)
 m4.metric("Breakouts today", len(db.get_signals(today)))
@@ -338,6 +348,41 @@ with tab_list:
     else:
         st.info("List is empty. Use search or **More ways to add** → Nifty 50.")
 
+    st.divider()
+    st.subheader(f"Indices ({len(st.session_state.index_symbols)})")
+    st.caption("Tracked every day together with the equity watchlist. The price cap does not apply to indices.")
+    if st.session_state.index_symbols:
+        st.dataframe(
+            [{"Index": index_label(s)} for s in st.session_state.index_symbols],
+            hide_index=True,
+            use_container_width=True,
+            height=min(220, 38 + len(st.session_state.index_symbols) * 35),
+        )
+    available = [symbol for symbol, _label in INDEX_CATALOG if symbol not in st.session_state.index_symbols]
+    add_ix, drop_ix = st.columns(2)
+    with add_ix:
+        to_add = st.multiselect(
+            "Add index",
+            options=available,
+            format_func=index_label,
+            placeholder="Nifty, Bank Nifty, …",
+        )
+        if st.button("Add indices", disabled=not to_add):
+            st.session_state.index_symbols = list(st.session_state.index_symbols) + list(to_add)
+            update_index_symbols(st.session_state.index_symbols)
+            st.rerun()
+    with drop_ix:
+        to_drop = st.multiselect(
+            "Remove index",
+            options=st.session_state.index_symbols,
+            format_func=index_label,
+            placeholder="Choose an index",
+        )
+        if st.button("Remove indices", disabled=not to_drop):
+            st.session_state.index_symbols = [s for s in st.session_state.index_symbols if s not in to_drop]
+            update_index_symbols(st.session_state.index_symbols)
+            st.rerun()
+
 # ── Strategy ───────────────────────────────────────────────────────────────────
 
 with tab_rules:
@@ -385,6 +430,16 @@ with tab_rules:
                 value=_cutoff_value(settings.entry_cutoff),
                 step=timedelta(minutes=5),
             )
+            track_retest = st.toggle("Also alert retest entries", value=settings.track_retest)
+            retest_window = st.selectbox(
+                "Retest must break again within",
+                options=list(RETEST_WINDOWS),
+                index=list(RETEST_WINDOWS).index(settings.retest_within_minutes)
+                if settings.retest_within_minutes in RETEST_WINDOWS
+                else 1,
+                format_func=lambda m: f"{m} minutes of the first break",
+                disabled=not track_retest,
+            )
 
         st.divider()
         st.subheader("Actions")
@@ -411,6 +466,9 @@ with tab_rules:
             orb_duration_minutes=int(duration),
             breakout_timeframe_minutes=int(timeframe),
             entry_cutoff=cutoff.strftime("%H:%M"),
+            index_symbols=list(st.session_state.index_symbols),
+            track_retest=bool(track_retest),
+            retest_within_minutes=int(retest_window),
         )
 
     if save:
@@ -477,6 +535,7 @@ with tab_day:
                         {
                             "Symbol": _ticker(r["symbol"]),
                             "Side": r["signal_type"],
+                            "Entry": "Retest" if r.get("entry_style") == "retest" else "Direct",
                             "Close": r["candle_close"],
                             "Swing SL": r["suggested_sl"],
                             "ORB SL": r["orb_stop"],
@@ -498,77 +557,100 @@ with tab_day:
 
 with tab_backtest:
     st.caption(
-        "Replays the watchlist on 1-minute history. Entry is the breakout close, "
-        "stop is the latest swing or the opening-range extreme, and the target is entry ± RRR × risk. "
-        "Same-time names are ranked by volume versus the average of earlier breakout candles since the range ended. "
+        "Replays the lists you choose on 1-minute history. Direct entry uses the first close outside the range. "
+        "Retest waits for a close back inside, then a second close outside in the same direction. "
+        "Stop is the latest swing or the opening-range extreme, and the target is entry ± RRR × risk. "
         "Size never exceeds the capital you enter here, and it shrinks after a losing day."
     )
     default_to = datetime.now(IST).date()
     default_from = default_to - timedelta(days=30)
+    st.subheader("Entry")
+    e1, e2 = st.columns(2)
+    bt_entry_mode = e1.selectbox(
+        "Entry",
+        options=["direct", "retest"],
+        format_func=lambda key: "Direct breakout" if key == "direct" else "Retest",
+    )
+    bt_retest_window = e2.selectbox(
+        "Second break within",
+        options=list(RETEST_WINDOWS),
+        index=1,
+        format_func=lambda m: f"{m} minutes of the first break",
+        disabled=bt_entry_mode != "retest",
+    )
     with st.form("backtest_form"):
+        st.subheader("Dates and symbols")
         d1, d2, d3 = st.columns(3)
-        with d1:
-            bt_from = st.date_input("From", value=default_from)
-            bt_capital = st.number_input("Capital (₹)", min_value=1000.0, value=100_000.0, step=10_000.0)
-            bt_margin = st.selectbox("Margin", options=[4, 5, 10], index=1, format_func=lambda n: f"{n}×")
-        with d2:
-            bt_to = st.date_input("To", value=default_to)
-            bt_risk = st.number_input("Risk per trade (%)", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
-            bt_day_risk = st.number_input("Risk per day (%)", min_value=0.1, max_value=20.0, value=3.0, step=0.1)
-        with d3:
-            bt_rrr = st.number_input("Reward : risk", min_value=0.5, max_value=10.0, value=2.0, step=0.5)
-            bt_max_trades = st.number_input("Max trades per day", min_value=1, max_value=20, value=3, step=1)
-            bt_price_on = st.toggle("Price filter", value=settings.max_price_enabled)
+        bt_from = d1.date_input("From", value=default_from)
+        bt_to = d2.date_input("To", value=default_to)
+        bt_universe = d3.selectbox(
+            "Symbols",
+            options=["watchlist", "indices", "both"],
+            format_func=lambda key: {"watchlist": "Equity watchlist", "indices": "Indices", "both": "Both lists"}[key],
+        )
+        bt_cutoff = st.time_input(
+            "No entry after",
+            value=_cutoff_value(settings.entry_cutoff),
+            step=timedelta(minutes=5),
+        )
 
-        r1, r2, r3 = st.columns(3)
-        with r1:
-            bt_max_price = st.number_input(
-                "Max price (₹)",
-                min_value=1.0,
-                value=float(settings.max_stock_price),
-                step=10.0,
-                disabled=not bt_price_on,
-            )
-        with r2:
-            bt_threshold = st.number_input(
-                "ORB range (%)",
-                min_value=0.05,
-                max_value=20.0,
-                value=float(settings.orb_range_threshold),
-                step=0.05,
-                format="%.2f",
-            )
-            bt_range_mode = st.selectbox(
-                "Range qualifies when",
-                options=list(RANGE_MODES),
-                index=list(RANGE_MODES).index(settings.orb_range_mode),
-                format_func=_range_mode_label,
-                key="bt_range_mode",
-            )
-            bt_duration = st.selectbox(
-                "Opening range from 09:15",
-                options=list(ORB_DURATIONS),
-                index=list(ORB_DURATIONS).index(settings.orb_duration_minutes),
-                format_func=_duration_label,
-            )
-        with r3:
-            bt_timeframe = st.selectbox(
-                "Breakout candle size",
-                options=list(BREAKOUT_TIMEFRAMES),
-                index=list(BREAKOUT_TIMEFRAMES).index(settings.breakout_timeframe_minutes),
-                format_func=lambda m: f"{m} minutes",
-            )
-            bt_cutoff = st.time_input(
-                "No entry after",
-                value=_cutoff_value(settings.entry_cutoff),
-                step=timedelta(minutes=5),
-                key="bt_entry_cutoff",
-            )
+        st.subheader("Opening range")
+        o1, o2, o3 = st.columns(3)
+        bt_duration = o1.selectbox(
+            "Opening range from 09:15",
+            options=list(ORB_DURATIONS),
+            index=list(ORB_DURATIONS).index(settings.orb_duration_minutes),
+            format_func=_duration_label,
+        )
+        bt_timeframe = o2.selectbox(
+            "Breakout candle size",
+            options=list(BREAKOUT_TIMEFRAMES),
+            index=list(BREAKOUT_TIMEFRAMES).index(settings.breakout_timeframe_minutes),
+            format_func=lambda m: f"{m} minutes",
+        )
+        bt_threshold = o3.number_input(
+            "ORB range (%)",
+            min_value=0.05,
+            max_value=20.0,
+            value=float(settings.orb_range_threshold),
+            step=0.05,
+            format="%.2f",
+        )
+        bt_range_mode = st.selectbox(
+            "Range qualifies when",
+            options=list(RANGE_MODES),
+            index=list(RANGE_MODES).index(settings.orb_range_mode),
+            format_func=_range_mode_label,
+        )
+
+        st.subheader("Risk")
+        k1, k2, k3, k4 = st.columns(4)
+        bt_capital = k1.number_input("Capital (₹)", min_value=1000.0, value=100_000.0, step=10_000.0)
+        bt_margin = k2.selectbox("Margin", options=[4, 5, 10], index=1, format_func=lambda n: f"{n}×")
+        bt_risk = k3.number_input("Risk per trade (%)", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
+        bt_day_risk = k4.number_input("Risk per day (%)", min_value=0.1, max_value=20.0, value=3.0, step=0.1)
+        k5, k6, k7, k8 = st.columns(4)
+        bt_rrr = k5.number_input("Reward : risk", min_value=0.5, max_value=10.0, value=2.0, step=0.5)
+        bt_max_trades = k6.number_input("Max trades per day", min_value=1, max_value=20, value=2, step=1)
+        bt_price_on = k7.toggle("Price filter", value=settings.max_price_enabled)
+        bt_max_price = k8.number_input(
+            "Max price (₹)",
+            min_value=1.0,
+            value=float(settings.max_stock_price),
+            step=10.0,
+            disabled=not bt_price_on,
+        )
         run_bt = st.form_submit_button("Run backtest", type="primary")
 
     if run_bt:
-        if not st.session_state.symbols:
-            st.error("Add symbols on the Watchlist tab first.")
+        if bt_universe == "indices":
+            bt_symbols = list(st.session_state.index_symbols)
+        elif bt_universe == "both":
+            bt_symbols = list(dict.fromkeys(list(st.session_state.symbols) + list(st.session_state.index_symbols)))
+        else:
+            bt_symbols = list(st.session_state.symbols)
+        if not bt_symbols:
+            st.error("The chosen list is empty.")
         elif not is_token_valid():
             st.error("Fyers token is missing. Use Strategy → Telegram: new Fyers login, then run again.")
         else:
@@ -577,7 +659,7 @@ with tab_backtest:
             from src.broker.fyers_client import get_client
 
             request = BacktestRequest(
-                symbols=list(st.session_state.symbols),
+                symbols=bt_symbols,
                 date_from=bt_from,
                 date_to=bt_to,
                 orb_range_threshold=float(bt_threshold),
@@ -585,6 +667,8 @@ with tab_backtest:
                 orb_duration_minutes=int(bt_duration),
                 breakout_timeframe_minutes=int(bt_timeframe),
                 entry_cutoff=bt_cutoff.strftime("%H:%M"),
+                entry_mode=bt_entry_mode,
+                retest_within_minutes=int(bt_retest_window),
                 max_price_enabled=bool(bt_price_on),
                 max_stock_price=float(bt_max_price),
                 capital=float(bt_capital),

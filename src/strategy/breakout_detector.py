@@ -5,6 +5,7 @@ from typing import Callable
 
 import pytz
 
+from src.strategy.retest import find_retest_candle
 from src.strategy.structure_sl import suggest_stop_loss
 from src.utils.orb_math import entry_is_allowed
 from src.utils import db
@@ -33,11 +34,15 @@ class BreakoutDetector:
         *,
         breakout_minutes: int = 15,
         entry_cutoff: str = "15:15",
+        track_retest: bool = False,
+        retest_within_minutes: int = 30,
     ):
         self._orb = orb_levels
         self._callback = on_breakout_callback
         self._breakout_minutes = breakout_minutes
         self._entry_cutoff = entry_cutoff
+        self._track_retest = track_retest
+        self._retest_within = retest_within_minutes
         self._prior_candles: dict[str, list[dict]] = defaultdict(list)
 
     def check_candle(self, symbol: str, candle: dict) -> None:
@@ -69,7 +74,7 @@ class BreakoutDetector:
             and not entry_is_allowed(candle["candle_start"], self._breakout_minutes, self._entry_cutoff)
         )
 
-        def _emit(signal_type: str, orb_level: float, move_pct: float) -> None:
+        def _emit(signal_type: str, orb_level: float, move_pct: float, entry_style: str = "direct") -> None:
             sl = suggest_stop_loss(
                 signal_type,
                 close,
@@ -88,6 +93,7 @@ class BreakoutDetector:
                 suggested_sl=sl["suggested_sl"],
                 orb_stop=sl["orb_stop"],
                 stop_basis=sl["stop_basis"],
+                entry_style=entry_style,
             )
             swing_at = sl.get("swing_at")
             signal = {
@@ -102,6 +108,7 @@ class BreakoutDetector:
                 "orb_stop": sl["orb_stop"],
                 "stop_basis": sl["stop_basis"],
                 "swing_at": swing_at.strftime("%H:%M IST") if isinstance(swing_at, datetime) else None,
+                "entry_style": entry_style,
             }
             self._callback(signal)
 
@@ -128,6 +135,28 @@ class BreakoutDetector:
                     symbol, close, orb_low, move_pct,
                 )
                 _emit("BEARISH", orb_low, move_pct)
+
+        if (
+            self._track_retest
+            and isinstance(candle.get("candle_start"), datetime)
+            and not db.has_entry_fired(today, symbol, "retest")
+        ):
+            history = prior + [candle]
+            chosen = find_retest_candle(
+                history,
+                orb_low,
+                orb_high,
+                breakout_minutes=self._breakout_minutes,
+                within_minutes=self._retest_within,
+                cutoff=self._entry_cutoff,
+            )
+            if chosen is not None and chosen.get("candle_start") == candle.get("candle_start"):
+                if close > orb_high:
+                    move_pct = (close - orb_high) / orb_high * 100
+                    _emit("BULLISH", orb_high, move_pct, "retest")
+                elif close < orb_low:
+                    move_pct = (orb_low - close) / orb_low * 100
+                    _emit("BEARISH", orb_low, move_pct, "retest")
 
         self._prior_candles[symbol].append(dict(candle))
 

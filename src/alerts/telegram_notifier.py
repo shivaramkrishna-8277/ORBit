@@ -66,7 +66,7 @@ class TelegramNotifier:
     def send_breakout_alert(self, signal: dict) -> None:
         from src.alerts.position_calculator import prompt_trade_setup
 
-        sym = signal["symbol"].replace("NSE:", "").replace("-EQ", "")
+        sym = signal["symbol"].replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "")
         close = signal["candle_close"]
         orb = signal["orb_level"]
         move = signal["move_pct"]
@@ -76,9 +76,10 @@ class TelegramNotifier:
         suggested = signal.get("suggested_sl")
         stop_basis = signal.get("stop_basis")
 
+        style = "RETEST " if signal.get("entry_style") == "retest" else ""
         if signal["signal_type"] == "BULLISH":
             msg = (
-                f"🟢 BULLISH BREAKOUT — {sym}\n"
+                f"🟢 {style}BULLISH BREAKOUT — {sym}\n"
                 f"Close:    ₹{close:.2f}  |  ORB High: ₹{orb:.2f}\n"
                 f"Move:     +{move:.2f}% above ORB\n"
                 f"Time:     {ts}"
@@ -92,7 +93,7 @@ class TelegramNotifier:
                 msg += swing_line
         else:
             msg = (
-                f"🔴 BEARISH BREAKOUT — {sym}\n"
+                f"🔴 {style}BEARISH BREAKOUT — {sym}\n"
                 f"Close:    ₹{close:.2f}  |  ORB Low:  ₹{orb:.2f}\n"
                 f"Move:     -{move:.2f}% below ORB\n"
                 f"Time:     {ts}"
@@ -134,7 +135,7 @@ class TelegramNotifier:
             scope = "price filter off"
         else:
             scope = f"under ₹{config.MAX_STOCK_PRICE:.0f}"
-        names = [s.replace("NSE:", "").replace("-EQ", "") for s in watchlist[:10]]
+        names = [s.replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "") for s in watchlist[:10]]
         msg = (
             f"📊 ORB session started.\n"
             f"Tracking {len(watchlist)} stocks ({scope}) today.\n"
@@ -153,7 +154,7 @@ class TelegramNotifier:
         threshold = settings.orb_range_threshold if settings is not None else config.ORB_RANGE_THRESHOLD
         range_mode = getattr(settings, "orb_range_mode", "lte") if settings is not None else "lte"
         rule = f"range {'≥' if range_mode == 'gte' else '≤'} {threshold:g}%"
-        names = [s.replace("NSE:", "").replace("-EQ", "") for s in passed_symbols]
+        names = [s.replace("NSE:", "").replace("-EQ", "").replace("-INDEX", "") for s in passed_symbols]
         title = "🔁 ORB recalculated." if recalc else "✅ ORB filter done."
         window = ""
         if settings is not None:

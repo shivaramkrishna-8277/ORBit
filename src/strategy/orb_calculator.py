@@ -41,7 +41,7 @@ class ORBCalculator:
         threshold = settings.orb_range_threshold if settings is not None else config.ORB_RANGE_THRESHOLD
         range_mode = settings.orb_range_mode if settings is not None else "lte"
 
-        if price_filter_on and open_price >= max_price:
+        if price_filter_on and not str(symbol).endswith("-INDEX") and open_price >= max_price:
             db.insert_orb_level(today, symbol, orb_high, orb_low, 0.0, passed=0)
             logger.info(
                 "%s DROPPED — open ₹%.2f exceeds ₹%.0f price limit",

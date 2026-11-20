@@ -87,6 +87,7 @@ class _InMemoryDB:
         suggested_sl=None,
         orb_stop=None,
         stop_basis=None,
+        entry_style="direct",
     ):
         self._fired.add((date, symbol))
         sid = self._next_id

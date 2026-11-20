@@ -102,6 +102,9 @@ _DDL = [
         orb_range_threshold          REAL    NOT NULL,
         orb_range_mode               TEXT    NOT NULL DEFAULT 'lte',
         entry_cutoff                 TEXT    NOT NULL DEFAULT '15:15',
+        index_symbols_json           TEXT    NOT NULL DEFAULT '["NSE:NIFTY50-INDEX"]',
+        track_retest                 INTEGER NOT NULL DEFAULT 0,
+        retest_within_minutes        INTEGER NOT NULL DEFAULT 30,
         orb_duration_minutes         INTEGER NOT NULL,
         breakout_timeframe_minutes   INTEGER NOT NULL,
         updated_at                   TEXT    NOT NULL
@@ -130,6 +133,19 @@ def _migrate_settings_columns(con: sqlite3.Connection) -> None:
         con.execute(
             "ALTER TABLE strategy_settings ADD COLUMN entry_cutoff TEXT NOT NULL DEFAULT '15:15'"
         )
+    if "index_symbols_json" not in existing:
+        con.execute(
+            """ALTER TABLE strategy_settings
+               ADD COLUMN index_symbols_json TEXT NOT NULL DEFAULT '["NSE:NIFTY50-INDEX"]'"""
+        )
+    if "track_retest" not in existing:
+        con.execute(
+            "ALTER TABLE strategy_settings ADD COLUMN track_retest INTEGER NOT NULL DEFAULT 0"
+        )
+    if "retest_within_minutes" not in existing:
+        con.execute(
+            "ALTER TABLE strategy_settings ADD COLUMN retest_within_minutes INTEGER NOT NULL DEFAULT 30"
+        )
 
 
 def _migrate_signals_columns(con: sqlite3.Connection) -> None:
@@ -138,6 +154,7 @@ def _migrate_signals_columns(con: sqlite3.Connection) -> None:
         ("suggested_sl", "REAL"),
         ("orb_stop", "REAL"),
         ("stop_basis", "TEXT"),
+        ("entry_style", "TEXT"),
     ):
         if name not in existing:
             con.execute(f"ALTER TABLE signals ADD COLUMN {name} {col_type}")
@@ -230,14 +247,15 @@ def insert_signal(
     suggested_sl: float | None = None,
     orb_stop: float | None = None,
     stop_basis: str | None = None,
+    entry_style: str = "direct",
 ) -> int:
     """Insert a new signal row and return its id."""
     with _conn() as con:
         cur = con.execute(
             """INSERT INTO signals
                (date, symbol, signal_type, candle_close, orb_level, move_pct, triggered_at,
-                alerted, suggested_sl, orb_stop, stop_basis)
-               VALUES (?,?,?,?,?,?,?,0,?,?,?)""",
+                alerted, suggested_sl, orb_stop, stop_basis, entry_style)
+               VALUES (?,?,?,?,?,?,?,0,?,?,?,?)""",
             (
                 date,
                 symbol,
@@ -249,17 +267,33 @@ def insert_signal(
                 suggested_sl,
                 orb_stop,
                 stop_basis,
+                entry_style,
             ),
         )
         return cur.lastrowid
 
 
-def has_signal_fired(date: str, symbol: str, signal_type: str) -> bool:
-    """Return True if this symbol already fired a signal of this type today."""
+def has_signal_fired(date: str, symbol: str, signal_type: str, entry_style: str = "direct") -> bool:
+    """Return True if this symbol already fired this direction for this entry style today."""
     with _conn() as con:
         row = con.execute(
-            "SELECT 1 FROM signals WHERE date=? AND symbol=? AND signal_type=? LIMIT 1",
-            (date, symbol, signal_type),
+            """SELECT 1 FROM signals
+               WHERE date=? AND symbol=? AND signal_type=?
+                 AND IFNULL(entry_style, 'direct')=?
+               LIMIT 1""",
+            (date, symbol, signal_type, entry_style),
+        ).fetchone()
+    return row is not None
+
+
+def has_entry_fired(date: str, symbol: str, entry_style: str = "direct") -> bool:
+    """Return True if this symbol already has a direct or retest entry today."""
+    with _conn() as con:
+        row = con.execute(
+            """SELECT 1 FROM signals
+               WHERE date=? AND symbol=? AND IFNULL(entry_style, 'direct')=?
+               LIMIT 1""",
+            (date, symbol, entry_style),
         ).fetchone()
     return row is not None
 
@@ -340,14 +374,18 @@ def save_strategy_settings(
     updated_at: str,
     orb_range_mode: str = "lte",
     entry_cutoff: str = "15:15",
+    index_symbols_json: str = '["NSE:NIFTY50-INDEX"]',
+    track_retest: int = 0,
+    retest_within_minutes: int = 30,
 ) -> None:
     with _conn() as con:
         con.execute(
             """INSERT INTO strategy_settings (
                    id, symbols_json, max_price_enabled, max_stock_price,
-                   orb_range_threshold, orb_range_mode, entry_cutoff, orb_duration_minutes,
+                   orb_range_threshold, orb_range_mode, entry_cutoff, index_symbols_json,
+                   track_retest, retest_within_minutes, orb_duration_minutes,
                    breakout_timeframe_minutes, updated_at
-               ) VALUES (1,?,?,?,?,?,?,?,?,?)
+               ) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                    symbols_json=excluded.symbols_json,
                    max_price_enabled=excluded.max_price_enabled,
@@ -355,6 +393,9 @@ def save_strategy_settings(
                    orb_range_threshold=excluded.orb_range_threshold,
                    orb_range_mode=excluded.orb_range_mode,
                    entry_cutoff=excluded.entry_cutoff,
+                   index_symbols_json=excluded.index_symbols_json,
+                   track_retest=excluded.track_retest,
+                   retest_within_minutes=excluded.retest_within_minutes,
                    orb_duration_minutes=excluded.orb_duration_minutes,
                    breakout_timeframe_minutes=excluded.breakout_timeframe_minutes,
                    updated_at=excluded.updated_at""",
@@ -365,6 +406,9 @@ def save_strategy_settings(
                 orb_range_threshold,
                 orb_range_mode,
                 entry_cutoff,
+                index_symbols_json,
+                track_retest,
+                retest_within_minutes,
                 orb_duration_minutes,
                 breakout_timeframe_minutes,
                 updated_at,

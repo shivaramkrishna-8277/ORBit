@@ -24,6 +24,7 @@ _SETTINGS_JSON = CONFIG_DIR / "strategy_settings.json"
 ORB_DURATIONS = (5, 15, 30, 60)
 RANGE_MODES = ("lte", "gte")
 BREAKOUT_TIMEFRAMES = (1, 5, 15, 30)
+RETEST_WINDOWS = (15, 30, 60)
 _SYMBOL_BODY = re.compile(r"^[A-Z0-9&-]+$")
 
 
@@ -37,6 +38,9 @@ class StrategySettings:
     breakout_timeframe_minutes: int
     orb_range_mode: str = "lte"
     entry_cutoff: str = "15:15"
+    index_symbols: list[str] | None = None
+    track_retest: bool = False
+    retest_within_minutes: int = 30
     updated_at: str = ""
 
     @property
@@ -85,6 +89,16 @@ def validate_settings(settings: StrategySettings) -> StrategySettings:
     if not dtime(9, 15) < cutoff <= dtime(15, 15):
         raise ValueError("No-entry time must be after 09:15 and no later than 15:15.")
     settings.entry_cutoff = cutoff.strftime("%H:%M")
+    if settings.retest_within_minutes not in RETEST_WINDOWS:
+        raise ValueError("Retest window must be 15, 30, or 60 minutes.")
+    from src.strategy.indices import INDEX_CATALOG
+
+    allowed = {symbol for symbol, _label in INDEX_CATALOG}
+    indices: list[str] = []
+    for symbol in settings.index_symbols or []:
+        if symbol in allowed and symbol not in indices:
+            indices.append(symbol)
+    settings.index_symbols = indices
     if settings.max_price_enabled and settings.max_stock_price <= 0:
         raise ValueError("Max price must be greater than 0 when the price filter is on.")
 
@@ -105,6 +119,9 @@ def default_settings() -> StrategySettings:
         orb_duration_minutes=15,
         breakout_timeframe_minutes=15,
         entry_cutoff="15:15",
+        index_symbols=["NSE:NIFTY50-INDEX"],
+        track_retest=False,
+        retest_within_minutes=30,
         updated_at="",
     )
 
@@ -119,6 +136,9 @@ def _settings_from_row(row: dict) -> StrategySettings:
         orb_duration_minutes=int(row["orb_duration_minutes"]),
         breakout_timeframe_minutes=int(row["breakout_timeframe_minutes"]),
         entry_cutoff=str(row["entry_cutoff"] or "15:15") if "entry_cutoff" in row.keys() else "15:15",
+        index_symbols=json.loads(row["index_symbols_json"]) if row.get("index_symbols_json") else ["NSE:NIFTY50-INDEX"],
+        track_retest=bool(row.get("track_retest") or 0),
+        retest_within_minutes=int(row.get("retest_within_minutes") or 30),
         updated_at=row["updated_at"],
     )
 
@@ -133,6 +153,9 @@ def _settings_to_dict(settings: StrategySettings) -> dict:
         "orb_duration_minutes": settings.orb_duration_minutes,
         "breakout_timeframe_minutes": settings.breakout_timeframe_minutes,
         "entry_cutoff": settings.entry_cutoff,
+        "index_symbols": list(settings.index_symbols or []),
+        "track_retest": settings.track_retest,
+        "retest_within_minutes": settings.retest_within_minutes,
         "updated_at": settings.updated_at,
     }
 
@@ -160,6 +183,9 @@ def _read_json_backup() -> StrategySettings | None:
             orb_duration_minutes=int(data["orb_duration_minutes"]),
             breakout_timeframe_minutes=int(data["breakout_timeframe_minutes"]),
             entry_cutoff=str(data.get("entry_cutoff") or "15:15"),
+            index_symbols=list(data.get("index_symbols") or ["NSE:NIFTY50-INDEX"]),
+            track_retest=bool(data.get("track_retest") or False),
+            retest_within_minutes=int(data.get("retest_within_minutes") or 30),
             updated_at=str(data.get("updated_at", "")),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -197,9 +223,19 @@ def save_settings(settings: StrategySettings) -> StrategySettings:
         breakout_timeframe_minutes=int(settings.breakout_timeframe_minutes),
         updated_at=settings.updated_at,
         entry_cutoff=settings.entry_cutoff,
+        index_symbols_json=json.dumps(list(settings.index_symbols or [])),
+        track_retest=int(bool(settings.track_retest)),
+        retest_within_minutes=int(settings.retest_within_minutes),
     )
     _write_json_backup(settings)
     return settings
+
+
+def update_index_symbols(symbols: list[str]) -> StrategySettings:
+    """Persist the index list without touching the equity watchlist or ORB rules."""
+    current = load_settings()
+    current.index_symbols = list(symbols)
+    return save_settings(current)
 
 
 def update_watchlist(symbols: list[str]) -> StrategySettings:

@@ -227,6 +227,47 @@ def test_target_exit():
     assert trade["exit"] == trade["entry"] + 2 * (trade["entry"] - trade["stop"])
 
 
+def test_retest_enters_on_the_second_break_not_the_first():
+    orb = _flat((9, 15), 5, 100.0, 100)
+    orb[-1] = (9, 19, 100.0, 100.4, 99.4, 100.0, 100)
+    first = _flat((9, 20), 5, 100.2, 200)
+    first[-1] = (9, 24, 100.2, 101.2, 100.1, 101.0, 200)
+    back = _flat((9, 25), 5, 100.2, 80)
+    back[-1] = (9, 29, 100.2, 100.4, 99.8, 100.0, 80)
+    second = _flat((9, 30), 5, 100.3, 300)
+    second[-1] = (9, 34, 100.3, 102.2, 100.2, 102.0, 300)
+    after = _flat((9, 35), 5, 102.0, 50)
+    bars = {"NSE:AAA-EQ": _minutes(orb + first + back + second + after)}
+
+    direct = _run(bars, entry_mode="direct")
+    retest = _run(bars, entry_mode="retest", retest_within_minutes=30)
+    assert direct["trade_rows"][0]["entry"] == 101.0
+    assert retest["trade_rows"][0]["entry"] == 102.0
+    assert str(retest["trade_rows"][0]["entry_time"]).startswith("09:35")
+
+
+def test_index_ignores_the_equity_price_cap():
+    price = 24000.0
+    orb = _flat((9, 15), 5, price, 100)
+    orb[-1] = (9, 19, price, price + 40, price - 40, price, 100)
+    inside_a = _flat((9, 20), 5, price + 5, 100)
+    inside_b = _flat((9, 25), 5, price + 5, 100)
+    burst = _flat((9, 30), 5, price + 10, 400)
+    burst[-1] = (9, 34, price + 10, price + 80, price + 10, price + 70, 400)
+    nxt = _flat((9, 35), 5, price + 70, 80)
+    nxt[0] = (9, 35, price + 70, price + 200, price + 60, price + 70, 80)
+    bars = {"NSE:NIFTY50-INDEX": _minutes(orb + inside_a + inside_b + burst + nxt)}
+    kept = _run(bars, max_price_enabled=True, max_stock_price=900.0)
+    blocked = _run(
+        {"NSE:AAA-EQ": _minutes(orb + inside_a + inside_b + burst + nxt)},
+        max_price_enabled=True,
+        max_stock_price=900.0,
+    )
+    assert kept["trades"] == 1
+    assert kept["trade_rows"][0]["ticker"] == "NIFTY50"
+    assert blocked["trades"] == 0
+
+
 def test_profits_do_not_increase_next_day_size(monkeypatch):
     day_bars = {"NSE:AAA-EQ": _session(101.0, 400, next_low=100.5, next_high=110.0)}
 

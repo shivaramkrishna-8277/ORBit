@@ -8,6 +8,7 @@ import pytz
 
 from src.backtest.rank import rank_signals, volume_interest
 from src.strategy.intraday_agg import closed_breakout_candles, opening_range_candle, session_end
+from src.strategy.retest import find_retest_candle
 from src.strategy.structure_sl import suggest_stop_loss
 from src.utils.orb_math import entry_is_allowed, orb_range_pct, range_passes
 
@@ -33,7 +34,11 @@ def size_quantity(
 
 
 def _ticker(symbol: str) -> str:
-    return symbol.replace("NSE:", "").replace("-EQ", "")
+    text = symbol.replace("NSE:", "")
+    for suffix in ("-EQ", "-INDEX"):
+        if text.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
 
 
 def _exit_on_bar(side: str, stop: float, target: float, bar: dict) -> tuple[float, str] | None:
@@ -84,13 +89,15 @@ def _signals_for_symbol(
     orb_range_threshold: float,
     orb_range_mode: str,
     entry_cutoff: str,
+    entry_mode: str,
+    retest_within_minutes: int,
     rrr: float,
 ) -> tuple[dict | None, list[dict]]:
     """First breakout of the day, plus the breakout-timeframe candles used to manage it."""
     orb = opening_range_candle(minute_bars, day, orb_minutes)
     if orb is None:
         return None, []
-    if max_price_enabled and float(orb["open"]) >= max_stock_price:
+    if max_price_enabled and not symbol.endswith("-INDEX") and float(orb["open"]) >= max_stock_price:
         return None, []
     if float(orb["low"]) <= 0:
         return None, []
@@ -101,8 +108,21 @@ def _signals_for_symbol(
     candles = closed_breakout_candles(
         minute_bars, day, orb_minutes, breakout_minutes, session_end(day)
     )
+    chosen: dict | None = None
+    if entry_mode == "retest":
+        chosen = find_retest_candle(
+            candles,
+            float(orb["low"]),
+            float(orb["high"]),
+            breakout_minutes=breakout_minutes,
+            within_minutes=retest_within_minutes,
+            cutoff=entry_cutoff,
+        )
     prior: list[dict] = []
     for candle in candles:
+        if entry_mode == "retest" and candle is not chosen:
+            prior.append(candle)
+            continue
         close = float(candle["close"])
         if close > float(orb["high"]):
             side = "BULLISH"
@@ -162,6 +182,8 @@ def simulate_day(
     orb_range_threshold: float,
     orb_range_mode: str = "lte",
     entry_cutoff: str = "15:15",
+    entry_mode: str = "direct",
+    retest_within_minutes: int = 30,
 ) -> dict:
     """Simulate one session. Sizing capital is already capped by the caller."""
     day_dt = IST.localize(datetime(day.year, day.month, day.day, 9, 15))
@@ -185,6 +207,8 @@ def simulate_day(
             orb_range_threshold=orb_range_threshold,
             orb_range_mode=orb_range_mode,
             entry_cutoff=entry_cutoff,
+            entry_mode=entry_mode,
+            retest_within_minutes=retest_within_minutes,
             rrr=rrr,
         )
         candles_by_symbol[symbol] = {c["candle_start"]: c for c in candles}

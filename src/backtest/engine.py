@@ -27,6 +27,8 @@ class BacktestRequest:
     rrr: float
     orb_range_mode: str = "lte"
     entry_cutoff: str = "15:15"
+    entry_mode: str = "direct"
+    retest_within_minutes: int = 30
 
 
 def score_trades(trades: list[dict]) -> dict:
@@ -116,6 +118,8 @@ def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=No
             orb_range_threshold=request.orb_range_threshold,
             orb_range_mode=request.orb_range_mode,
             entry_cutoff=request.entry_cutoff,
+            entry_mode=request.entry_mode,
+            retest_within_minutes=request.retest_within_minutes,
         )
         equity_end = equity + result["pnl"]
         daily.append(

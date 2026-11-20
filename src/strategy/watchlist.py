@@ -4,6 +4,7 @@ from datetime import datetime
 import pytz
 
 from src.broker import fyers_client
+from src.strategy.indices import is_index
 from src.strategy.runtime_settings import load_settings
 from src.utils import db
 from src.utils.logger import get_logger
@@ -30,6 +31,9 @@ class WatchlistManager:
         today = datetime.now(IST).strftime("%Y-%m-%d")
         settings = load_settings()
         symbols = list(settings.symbols)
+        for symbol in settings.index_symbols or []:
+            if symbol not in symbols:
+                symbols.append(symbol)
         db.delete_watchlist(today)
 
         if not symbols:
@@ -42,6 +46,11 @@ class WatchlistManager:
         missing = 0
 
         for sym in symbols:
+            if is_index(sym):
+                price = quote_filter_price(quotes.get(sym)) if quotes.get(sym) else 0.0
+                db.insert_watchlist(today, sym, price or 0.0)
+                kept.append(sym)
+                continue
             data = quotes.get(sym)
             price = quote_filter_price(data) if data else None
             if settings.max_price_enabled:
