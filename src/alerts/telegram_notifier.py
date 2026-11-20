@@ -151,6 +151,8 @@ class TelegramNotifier:
         recalc: bool = False,
     ) -> None:
         threshold = settings.orb_range_threshold if settings is not None else config.ORB_RANGE_THRESHOLD
+        range_mode = getattr(settings, "orb_range_mode", "lte") if settings is not None else "lte"
+        rule = f"range {'≥' if range_mode == 'gte' else '≤'} {threshold:g}%"
         names = [s.replace("NSE:", "").replace("-EQ", "") for s in passed_symbols]
         title = "🔁 ORB recalculated." if recalc else "✅ ORB filter done."
         window = ""
@@ -162,7 +164,7 @@ class TelegramNotifier:
         msg = (
             f"{title}\n"
             f"{window}"
-            f"{len(passed_symbols)} stocks qualify | {dropped_count} dropped (range > {threshold:g}%)\n"
+            f"{len(passed_symbols)} stocks qualify | {dropped_count} dropped ({rule})\n"
         )
         if names:
             msg += "Qualifying: " + ", ".join(names)

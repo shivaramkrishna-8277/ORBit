@@ -17,6 +17,7 @@ from src.config import NIFTY50_SYMBOLS
 from src.strategy.runtime_settings import (
     BREAKOUT_TIMEFRAMES,
     ORB_DURATIONS,
+    RANGE_MODES,
     StrategySettings,
     enqueue_fyers_auth,
     enqueue_recalc,
@@ -37,6 +38,15 @@ def _ticker(symbol: str) -> str:
 def _end_label(minutes: int) -> str:
     end = datetime(2000, 1, 1, 9, 15) + timedelta(minutes=minutes)
     return end.strftime("%H:%M")
+
+
+def _duration_label(minutes: int) -> str:
+    name = "1 hour" if minutes == 60 else f"{minutes} min"
+    return f"{name} (ends {_end_label(minutes)})"
+
+
+def _range_mode_label(mode: str) -> str:
+    return "Greater than or equal" if mode == "gte" else "Less than or equal"
 
 
 def _load_symbols(settings: StrategySettings) -> None:
@@ -339,19 +349,25 @@ with tab_rules:
                 disabled=not price_on,
             )
             threshold = st.number_input(
-                "Max ORB range (%)",
+                "ORB range (%)",
                 min_value=0.05,
                 max_value=20.0,
                 value=float(settings.orb_range_threshold),
                 step=0.05,
                 format="%.2f",
             )
+            range_mode = st.selectbox(
+                "Range qualifies when",
+                options=list(RANGE_MODES),
+                index=list(RANGE_MODES).index(settings.orb_range_mode),
+                format_func=_range_mode_label,
+            )
         with c2:
             duration = st.selectbox(
                 "Opening range from 09:15",
                 options=list(ORB_DURATIONS),
                 index=list(ORB_DURATIONS).index(settings.orb_duration_minutes),
-                format_func=lambda m: f"{m} min (ends {_end_label(m)})",
+                format_func=_duration_label,
             )
             timeframe = st.selectbox(
                 "Breakout candle size",
@@ -381,6 +397,7 @@ with tab_rules:
             max_price_enabled=price_on,
             max_stock_price=float(max_price),
             orb_range_threshold=float(threshold),
+            orb_range_mode=range_mode,
             orb_duration_minutes=int(duration),
             breakout_timeframe_minutes=int(timeframe),
         )
@@ -503,18 +520,25 @@ with tab_backtest:
             )
         with r2:
             bt_threshold = st.number_input(
-                "Max ORB range (%)",
+                "ORB range (%)",
                 min_value=0.05,
                 max_value=20.0,
                 value=float(settings.orb_range_threshold),
                 step=0.05,
                 format="%.2f",
             )
+            bt_range_mode = st.selectbox(
+                "Range qualifies when",
+                options=list(RANGE_MODES),
+                index=list(RANGE_MODES).index(settings.orb_range_mode),
+                format_func=_range_mode_label,
+                key="bt_range_mode",
+            )
             bt_duration = st.selectbox(
                 "Opening range from 09:15",
                 options=list(ORB_DURATIONS),
                 index=list(ORB_DURATIONS).index(settings.orb_duration_minutes),
-                format_func=lambda m: f"{m} min (ends {_end_label(m)})",
+                format_func=_duration_label,
             )
         with r3:
             bt_timeframe = st.selectbox(
@@ -540,6 +564,7 @@ with tab_backtest:
                 date_from=bt_from,
                 date_to=bt_to,
                 orb_range_threshold=float(bt_threshold),
+                orb_range_mode=bt_range_mode,
                 orb_duration_minutes=int(bt_duration),
                 breakout_timeframe_minutes=int(bt_timeframe),
                 max_price_enabled=bool(bt_price_on),

@@ -25,6 +25,7 @@ class BacktestRequest:
     day_risk_pct: float
     max_trades_per_day: int
     rrr: float
+    orb_range_mode: str = "lte"
 
 
 def score_trades(trades: list[dict]) -> dict:
@@ -112,6 +113,7 @@ def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=No
             max_price_enabled=request.max_price_enabled,
             max_stock_price=request.max_stock_price,
             orb_range_threshold=request.orb_range_threshold,
+            orb_range_mode=request.orb_range_mode,
         )
         equity_end = equity + result["pnl"]
         daily.append(

@@ -8,7 +8,7 @@ from src.strategy.candle_builder import CandleBuilder
 from src.utils import db
 from src.utils.logger import get_logger
 from src.utils.market_sessions import is_opening_range_candle
-from src.utils.orb_math import orb_range_pct
+from src.utils.orb_math import orb_range_pct, range_passes
 logger = get_logger(__name__)
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -39,6 +39,7 @@ class ORBCalculator:
         price_filter_on = settings.max_price_enabled if settings is not None else True
         max_price = settings.max_stock_price if settings is not None else config.MAX_STOCK_PRICE
         threshold = settings.orb_range_threshold if settings is not None else config.ORB_RANGE_THRESHOLD
+        range_mode = settings.orb_range_mode if settings is not None else "lte"
 
         if price_filter_on and open_price >= max_price:
             db.insert_orb_level(today, symbol, orb_high, orb_low, 0.0, passed=0)
@@ -54,7 +55,7 @@ class ORBCalculator:
 
         range_pct = orb_range_pct(orb_high, orb_low)
 
-        if range_pct <= threshold:
+        if range_passes(range_pct, threshold, range_mode):
             db.insert_orb_level(today, symbol, orb_high, orb_low, range_pct, passed=1)
             logger.info(
                 "%s PASSED ORB filter — first 15-min range %.2f%% (H=%.2f L=%.2f)",
@@ -64,8 +65,8 @@ class ORBCalculator:
         else:
             db.insert_orb_level(today, symbol, orb_high, orb_low, range_pct, passed=0)
             logger.info(
-                "%s DROPPED — first 15-min range %.2f%% exceeds %.1f%% threshold",
-                symbol, range_pct, threshold,
+                "%s DROPPED — first 15-min range %.2f%% fails %s %.1f%%",
+                symbol, range_pct, range_mode, threshold,
             )
             return None
 

@@ -69,12 +69,14 @@ def suggest_stop_loss(
                 candidates.append((i, low))
         if candidates:
             idx, level = candidates[-1]
-            return {
-                "suggested_sl": level,
-                "orb_stop": orb_stop,
-                "stop_basis": "swing",
-                "swing_at": _swing_time(prior_candles[idx]),
-            }
+            # A swing below the opening-range low is outside the range: use the range.
+            if level >= orb_low:
+                return {
+                    "suggested_sl": level,
+                    "orb_stop": orb_stop,
+                    "stop_basis": "swing",
+                    "swing_at": _swing_time(prior_candles[idx]),
+                }
         return {
             "suggested_sl": orb_stop,
             "orb_stop": orb_stop,
@@ -92,12 +94,14 @@ def suggest_stop_loss(
                 candidates.append((i, high))
         if candidates:
             idx, level = candidates[-1]
-            return {
-                "suggested_sl": level,
-                "orb_stop": orb_stop,
-                "stop_basis": "swing",
-                "swing_at": _swing_time(prior_candles[idx]),
-            }
+            # A swing above the opening-range high is outside the range: use the range.
+            if level <= orb_high:
+                return {
+                    "suggested_sl": level,
+                    "orb_stop": orb_stop,
+                    "stop_basis": "swing",
+                    "swing_at": _swing_time(prior_candles[idx]),
+                }
         return {
             "suggested_sl": orb_stop,
             "orb_stop": orb_stop,

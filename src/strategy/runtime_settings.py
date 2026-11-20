@@ -20,7 +20,8 @@ logger = get_logger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
 _SETTINGS_JSON = CONFIG_DIR / "strategy_settings.json"
 
-ORB_DURATIONS = (5, 15, 30)
+ORB_DURATIONS = (5, 15, 30, 60)
+RANGE_MODES = ("lte", "gte")
 BREAKOUT_TIMEFRAMES = (1, 5, 15, 30)
 _SYMBOL_BODY = re.compile(r"^[A-Z0-9&-]+$")
 
@@ -33,6 +34,7 @@ class StrategySettings:
     orb_range_threshold: float
     orb_duration_minutes: int
     breakout_timeframe_minutes: int
+    orb_range_mode: str = "lte"
     updated_at: str = ""
 
     @property
@@ -73,6 +75,8 @@ def validate_settings(settings: StrategySettings) -> StrategySettings:
         raise ValueError(
             f"Breakout timeframe must be one of {', '.join(map(str, BREAKOUT_TIMEFRAMES))} minutes."
         )
+    if settings.orb_range_mode not in RANGE_MODES:
+        raise ValueError("ORB range rule must be less than or greater than.")
     if not 0 < settings.orb_range_threshold <= 20:
         raise ValueError("ORB percentage must be greater than 0 and at most 20.")
     if settings.max_price_enabled and settings.max_stock_price <= 0:
@@ -91,6 +95,7 @@ def default_settings() -> StrategySettings:
         max_price_enabled=True,
         max_stock_price=float(MAX_STOCK_PRICE),
         orb_range_threshold=float(ORB_RANGE_THRESHOLD),
+        orb_range_mode="lte",
         orb_duration_minutes=15,
         breakout_timeframe_minutes=15,
         updated_at="",
@@ -103,6 +108,7 @@ def _settings_from_row(row: dict) -> StrategySettings:
         max_price_enabled=bool(row["max_price_enabled"]),
         max_stock_price=float(row["max_stock_price"]),
         orb_range_threshold=float(row["orb_range_threshold"]),
+        orb_range_mode=str(row["orb_range_mode"]) if row["orb_range_mode"] else "lte",
         orb_duration_minutes=int(row["orb_duration_minutes"]),
         breakout_timeframe_minutes=int(row["breakout_timeframe_minutes"]),
         updated_at=row["updated_at"],
@@ -115,6 +121,7 @@ def _settings_to_dict(settings: StrategySettings) -> dict:
         "max_price_enabled": settings.max_price_enabled,
         "max_stock_price": settings.max_stock_price,
         "orb_range_threshold": settings.orb_range_threshold,
+        "orb_range_mode": settings.orb_range_mode,
         "orb_duration_minutes": settings.orb_duration_minutes,
         "breakout_timeframe_minutes": settings.breakout_timeframe_minutes,
         "updated_at": settings.updated_at,
@@ -140,6 +147,7 @@ def _read_json_backup() -> StrategySettings | None:
             max_price_enabled=bool(data["max_price_enabled"]),
             max_stock_price=float(data["max_stock_price"]),
             orb_range_threshold=float(data["orb_range_threshold"]),
+            orb_range_mode=str(data.get("orb_range_mode") or "lte"),
             orb_duration_minutes=int(data["orb_duration_minutes"]),
             breakout_timeframe_minutes=int(data["breakout_timeframe_minutes"]),
             updated_at=str(data.get("updated_at", "")),
@@ -174,6 +182,7 @@ def save_settings(settings: StrategySettings) -> StrategySettings:
         max_price_enabled=int(settings.max_price_enabled),
         max_stock_price=float(settings.max_stock_price),
         orb_range_threshold=float(settings.orb_range_threshold),
+        orb_range_mode=settings.orb_range_mode,
         orb_duration_minutes=int(settings.orb_duration_minutes),
         breakout_timeframe_minutes=int(settings.breakout_timeframe_minutes),
         updated_at=settings.updated_at,
