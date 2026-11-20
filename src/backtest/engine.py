@@ -29,6 +29,7 @@ class BacktestRequest:
     entry_cutoff: str = "15:15"
     entry_mode: str = "direct"
     retest_within_minutes: int = 30
+    include_months: tuple[tuple[int, int], ...] | None = None
 
 
 def score_trades(trades: list[dict]) -> dict:
@@ -61,6 +62,9 @@ def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=No
         raise ValueError("Max trades per day must be at least 1.")
 
     days = trading_days(request.date_from, request.date_to)
+    if request.include_months:
+        chosen = set(request.include_months)
+        days = [day for day in days if (day.year, day.month) in chosen]
     if not days:
         raise ValueError("No NSE sessions in that date range.")
 

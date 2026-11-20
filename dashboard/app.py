@@ -1,6 +1,6 @@
 """ORB control panel. Settings are stored in the same SQLite file the bot reads."""
 import sys
-from datetime import datetime, time as dtime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -11,6 +11,7 @@ import pytz
 import streamlit as st
 import streamlit.components.v1 as components
 
+from src.backtest.months import MONTH_NAMES, month_window
 from src.broker.auth import is_token_valid
 from src.broker.symbol_search import load_master, resolve_nse_equity, search_nse_equity
 from src.config import NIFTY50_SYMBOLS
@@ -562,8 +563,7 @@ with tab_backtest:
         "Stop is the latest swing or the opening-range extreme, and the target is entry ± RRR × risk. "
         "Size never exceeds the capital you enter here, and it shrinks after a losing day."
     )
-    default_to = datetime.now(IST).date()
-    default_from = default_to - timedelta(days=30)
+    today = datetime.now(IST).date()
     st.subheader("Entry")
     e1, e2 = st.columns(2)
     bt_entry_mode = e1.selectbox(
@@ -578,17 +578,30 @@ with tab_backtest:
         format_func=lambda m: f"{m} minutes of the first break",
         disabled=bt_entry_mode != "retest",
     )
+    st.subheader("Months")
+    y1, y2 = st.columns([1, 3])
+    year_choices = [today.year - 1, today.year]
+    bt_year = y1.selectbox("Year", options=year_choices, index=len(year_choices) - 1)
+    open_months = list(range(1, 13 if bt_year < today.year else today.month + 1))
+    bt_months = y2.multiselect(
+        "Months",
+        options=open_months,
+        default=[open_months[-1]],
+        format_func=lambda month: MONTH_NAMES[month - 1],
+    )
+    st.caption(
+        "Selected months are one backtest, and capital carries from one of those months into the next. "
+        "This year runs every month on its own, each one starting again at the capital below."
+    )
     with st.form("backtest_form"):
-        st.subheader("Dates and symbols")
-        d1, d2, d3 = st.columns(3)
-        bt_from = d1.date_input("From", value=default_from)
-        bt_to = d2.date_input("To", value=default_to)
-        bt_universe = d3.selectbox(
+        st.subheader("Symbols")
+        s1, s2 = st.columns(2)
+        bt_universe = s1.selectbox(
             "Symbols",
             options=["watchlist", "indices", "both"],
             format_func=lambda key: {"watchlist": "Equity watchlist", "indices": "Indices", "both": "Both lists"}[key],
         )
-        bt_cutoff = st.time_input(
+        bt_cutoff = s2.time_input(
             "No entry after",
             value=_cutoff_value(settings.entry_cutoff),
             step=timedelta(minutes=5),
@@ -640,9 +653,11 @@ with tab_backtest:
             step=10.0,
             disabled=not bt_price_on,
         )
-        run_bt = st.form_submit_button("Run backtest", type="primary")
+        b1, b2 = st.columns(2)
+        run_bt = b1.form_submit_button("Run selected months", type="primary")
+        run_year = b2.form_submit_button("This year, fresh each month")
 
-    if run_bt:
+    if run_bt or run_year:
         if bt_universe == "indices":
             bt_symbols = list(st.session_state.index_symbols)
         elif bt_universe == "both":
@@ -651,66 +666,147 @@ with tab_backtest:
             bt_symbols = list(st.session_state.symbols)
         if not bt_symbols:
             st.error("The chosen list is empty.")
+        elif run_bt and not bt_months:
+            st.error("Pick at least one month.")
         elif not is_token_valid():
             st.error("Fyers token is missing. Use Strategy → Telegram: new Fyers login, then run again.")
         else:
             from src.backtest.engine import BacktestRequest, run_backtest
+            from src.backtest.history import load_watchlist_minutes, merge_bar_store, range_is_cached, slice_bars
             from src.broker.auth import get_access_token
             from src.broker.fyers_client import get_client
 
-            request = BacktestRequest(
-                symbols=bt_symbols,
-                date_from=bt_from,
-                date_to=bt_to,
-                orb_range_threshold=float(bt_threshold),
-                orb_range_mode=bt_range_mode,
-                orb_duration_minutes=int(bt_duration),
-                breakout_timeframe_minutes=int(bt_timeframe),
-                entry_cutoff=bt_cutoff.strftime("%H:%M"),
-                entry_mode=bt_entry_mode,
-                retest_within_minutes=int(bt_retest_window),
-                max_price_enabled=bool(bt_price_on),
-                max_stock_price=float(bt_max_price),
-                capital=float(bt_capital),
-                margin_multiplier=float(bt_margin),
-                risk_pct=float(bt_risk),
-                day_risk_pct=float(bt_day_risk),
-                max_trades_per_day=int(bt_max_trades),
-                rrr=float(bt_rrr),
-            )
-            try:
-                with st.status("Running backtest…", expanded=True) as status:
-                    note = st.empty()
+            def _request(start: date, end: date, months: tuple[tuple[int, int], ...] | None) -> BacktestRequest:
+                return BacktestRequest(
+                    symbols=bt_symbols,
+                    date_from=start,
+                    date_to=end,
+                    orb_range_threshold=float(bt_threshold),
+                    orb_range_mode=bt_range_mode,
+                    orb_duration_minutes=int(bt_duration),
+                    breakout_timeframe_minutes=int(bt_timeframe),
+                    entry_cutoff=bt_cutoff.strftime("%H:%M"),
+                    entry_mode=bt_entry_mode,
+                    retest_within_minutes=int(bt_retest_window),
+                    max_price_enabled=bool(bt_price_on),
+                    max_stock_price=float(bt_max_price),
+                    capital=float(bt_capital),
+                    margin_multiplier=float(bt_margin),
+                    risk_pct=float(bt_risk),
+                    day_risk_pct=float(bt_day_risk),
+                    max_trades_per_day=int(bt_max_trades),
+                    rrr=float(bt_rrr),
+                    include_months=months,
+                )
 
-                    def _progress(message: str) -> None:
-                        note.write(message)
+            if run_year:
+                windows = [month_window(today.year, month, today) for month in range(1, today.month + 1)]
+                windows = [window for window in windows if window is not None]
+            else:
+                windows = [month_window(int(bt_year), int(month), today) for month in bt_months]
+                windows = [window for window in windows if window is not None]
+            if not windows:
+                st.error("Those months have not started yet.")
+            else:
+                try:
+                    with st.status("Running backtest…", expanded=True) as status:
+                        note = st.empty()
 
-                    from src.backtest.history import load_watchlist_minutes, merge_bar_store, range_is_cached, slice_bars
+                        def _progress(message: str) -> None:
+                            note.write(message)
 
-                    token = get_access_token(allow_oauth=False)
-                    client = get_client(token)
-                    store = st.session_state.get("bt_hist_store")
-                    if range_is_cached(store, request.symbols, request.date_from, request.date_to):
-                        _progress("Using cached history for this date range. No download.")
-                        bars = slice_bars(store["bars"], request.date_from, request.date_to)
-                    else:
-                        bars = load_watchlist_minutes(
-                            client,
-                            request.symbols,
-                            request.date_from,
-                            request.date_to,
-                            progress=_progress,
-                        )
-                        st.session_state.bt_hist_store = merge_bar_store(
-                            store, request.symbols, request.date_from, request.date_to, bars
-                        )
-                    report = run_backtest(client, request, progress=_progress, minute_bars=bars)
-                    st.session_state.backtest_report = report
-                    status.update(label="Backtest finished", state="complete")
-            except Exception as exc:
-                st.error(str(exc))
+                        span_start = min(window[0] for window in windows)
+                        span_end = max(window[1] for window in windows)
+                        token = get_access_token(allow_oauth=False)
+                        client = get_client(token)
+                        store = st.session_state.get("bt_hist_store")
+                        if range_is_cached(store, bt_symbols, span_start, span_end):
+                            _progress("Using cached history for this date range. No download.")
+                            bars = slice_bars(store["bars"], span_start, span_end)
+                        else:
+                            bars = load_watchlist_minutes(
+                                client, bt_symbols, span_start, span_end, progress=_progress
+                            )
+                            st.session_state.bt_hist_store = merge_bar_store(
+                                store, bt_symbols, span_start, span_end, bars
+                            )
+                        if run_year:
+                            month_reports = []
+                            for start, end in windows:
+                                _progress(f"{MONTH_NAMES[start.month - 1]} {start.year}")
+                                month_report = run_backtest(
+                                    client,
+                                    _request(start, end, ((start.year, start.month),)),
+                                    progress=_progress,
+                                    minute_bars=slice_bars(bars, start, end),
+                                )
+                                month_report["label"] = f"{MONTH_NAMES[start.month - 1]} {start.year}"
+                                month_reports.append(month_report)
+                            st.session_state.backtest_months = month_reports
+                            st.session_state.backtest_report = month_reports[-1]
+                        else:
+                            chosen = tuple(sorted((start.year, start.month) for start, _end in windows))
+                            report = run_backtest(
+                                client,
+                                _request(span_start, span_end, chosen),
+                                progress=_progress,
+                                minute_bars=bars,
+                            )
+                            st.session_state.backtest_months = None
+                            st.session_state.backtest_report = report
+                        status.update(label="Backtest finished", state="complete")
+                except Exception as exc:
+                    st.error(str(exc))
 
-    report = st.session_state.get("backtest_report")
+    month_reports = st.session_state.get("backtest_months") or []
+    if month_reports:
+        wins = sum(row["wins"] for row in month_reports)
+        losses = sum(row["losses"] for row in month_reports)
+        resolved = wins + losses
+        st.subheader(f"{today.year} by month")
+        st.caption("Every month starts at the same capital. A loss in one month does not change the next month.")
+        st.dataframe(
+            [
+                {
+                    "Month": row["label"],
+                    "Sessions": row["sessions"],
+                    "Trades": row["trades"],
+                    "Targets": row["wins"],
+                    "Stops": row["losses"],
+                    "Win rate": f"{row['win_rate']:.1f}%",
+                    "Gross P&L": round(row["gross_pnl"], 2),
+                    "Ending equity": round(row["ending_equity"], 2),
+                    "Max drawdown": round(row["max_drawdown"], 2),
+                    "Avg R": round(row["avg_r"], 2),
+                }
+                for row in month_reports
+            ]
+            + [
+                {
+                    "Month": "All months",
+                    "Sessions": sum(row["sessions"] for row in month_reports),
+                    "Trades": sum(row["trades"] for row in month_reports),
+                    "Targets": wins,
+                    "Stops": losses,
+                    "Win rate": f"{(wins / resolved * 100) if resolved else 0:.1f}%",
+                    "Gross P&L": round(sum(row["gross_pnl"] for row in month_reports), 2),
+                    "Ending equity": None,
+                    "Max drawdown": None,
+                    "Avg R": round(
+                        sum(row["avg_r"] * (row["wins"] + row["losses"]) for row in month_reports) / resolved, 2
+                    )
+                    if resolved
+                    else 0,
+                }
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+        labels = [row["label"] for row in month_reports]
+        picked = st.selectbox("Trades for", options=labels, index=len(labels) - 1)
+        report = month_reports[labels.index(picked)]
+    else:
+        report = st.session_state.get("backtest_report")
     if report:
         st.subheader("Report")
         k1, k2, k3, k4 = st.columns(4)

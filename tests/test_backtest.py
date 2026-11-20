@@ -268,6 +268,44 @@ def test_index_ignores_the_equity_price_cap():
     assert blocked["trades"] == 0
 
 
+def test_include_months_skips_sessions_outside_the_selection(monkeypatch):
+    monkeypatch.setattr(
+        "src.backtest.engine.trading_days",
+        lambda _start, _end: [date(2026, 1, 5), date(2026, 2, 2)],
+    )
+    report = run_backtest(
+        None,
+        BacktestRequest(
+            symbols=["NSE:AAA-EQ"],
+            date_from=date(2026, 1, 1),
+            date_to=date(2026, 2, 28),
+            orb_range_threshold=5,
+            orb_duration_minutes=5,
+            breakout_timeframe_minutes=5,
+            max_price_enabled=False,
+            max_stock_price=10000,
+            capital=100_000,
+            margin_multiplier=5,
+            risk_pct=1,
+            day_risk_pct=3,
+            max_trades_per_day=2,
+            rrr=2,
+            include_months=((2026, 1),),
+        ),
+        minute_bars={"NSE:AAA-EQ": []},
+    )
+    assert report["sessions"] == 1
+    assert report["daily_rows"][0]["date"] == "2026-01-05"
+
+
+def test_month_window_stops_at_today_and_skips_a_future_month():
+    from src.backtest.months import month_window
+
+    assert month_window(2026, 10, date(2026, 11, 20)) == (date(2026, 10, 1), date(2026, 10, 31))
+    assert month_window(2026, 11, date(2026, 11, 20)) == (date(2026, 11, 1), date(2026, 11, 20))
+    assert month_window(2026, 12, date(2026, 11, 20)) is None
+
+
 def test_profits_do_not_increase_next_day_size(monkeypatch):
     day_bars = {"NSE:AAA-EQ": _session(101.0, 400, next_low=100.5, next_high=110.0)}
 
