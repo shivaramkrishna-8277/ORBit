@@ -81,6 +81,7 @@ class BreakoutDetector:
                 orb_low,
                 orb_high,
                 prior,
+                confirming_candle=candle,
             )
             signal_id = db.insert_signal(
                 date=today,

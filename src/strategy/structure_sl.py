@@ -49,22 +49,30 @@ def suggest_stop_loss(
     *,
     swing_left: int = 1,
     swing_right: int = 1,
+    confirming_candle: dict | None = None,
 ) -> dict[str, Any]:
     """
-  Pick stop loss from the latest confirmed swing between ORB end and the breakout bar.
+    Pick stop loss from the latest confirmed swing before the entry candle.
 
-  prior_candles: fully closed breakout-timeframe bars before the signal candle (not inclusive).
-  """
+    prior_candles are the closed breakout bars before the entry. The entry candle
+    can confirm the swing on the bar just before it, but it is not a swing itself.
+    A swing beyond the opening range, below the low for a long or above the high
+    for a short, falls back to that opening-range extreme.
+    """
     entry = float(entry)
     orb_low = float(orb_low)
     orb_high = float(orb_high)
+    scanned = list(prior_candles)
+    if confirming_candle is not None:
+        scanned.append(confirming_candle)
+    last_prior = len(prior_candles) - 1
 
     if signal_type == "BULLISH":
         orb_stop = orb_low
-        swings = _swing_low_indices(prior_candles, swing_left, swing_right)
+        swings = [i for i in _swing_low_indices(scanned, swing_left, swing_right) if i <= last_prior]
         candidates: list[tuple[int, float]] = []
         for i in swings:
-            low = float(prior_candles[i]["low"])
+            low = float(scanned[i]["low"])
             if low < entry:
                 candidates.append((i, low))
         if candidates:
@@ -86,10 +94,10 @@ def suggest_stop_loss(
 
     if signal_type == "BEARISH":
         orb_stop = orb_high
-        swings = _swing_high_indices(prior_candles, swing_left, swing_right)
+        swings = [i for i in _swing_high_indices(scanned, swing_left, swing_right) if i <= last_prior]
         candidates = []
         for i in swings:
-            high = float(prior_candles[i]["high"])
+            high = float(scanned[i]["high"])
             if high > entry:
                 candidates.append((i, high))
         if candidates:
