@@ -158,14 +158,7 @@ def _signal_from_candles(
         else:
             prior.append(candle)
             continue
-        sl = suggest_stop_loss(
-            side,
-            close,
-            float(orb["low"]),
-            float(orb["high"]),
-            prior,
-            confirming_candle=candle,
-        )
+        sl = suggest_stop_loss(side, close, float(orb["low"]), float(orb["high"]), prior)
         stop = float(sl["suggested_sl"])
         distance = abs(close - stop)
         if distance <= 0:

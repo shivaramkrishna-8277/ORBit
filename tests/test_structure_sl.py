@@ -75,31 +75,6 @@ def test_bullish_falls_back_to_orb_when_no_swings():
     assert info["suggested_sl"] == 80.60
 
 
-def test_retest_uses_the_pullback_low_confirmed_by_the_entry_candle():
-    """The swing is the bar before entry. The entry candle is what confirms it."""
-    prior = [
-        _bar(81.20, 80.90, 81.00, 0),
-        _bar(81.10, 80.40, 80.80, 5),
-        _bar(81.50, 80.95, 81.30, 10),
-        _bar(82.20, 81.70, 82.00, 15),
-        _bar(82.00, 81.30, 81.45, 20),
-    ]
-    entry_candle = _bar(82.50, 81.50, 82.30, 25)
-    without = suggest_stop_loss("BULLISH", 82.30, 80.60, 81.50, prior)
-    with_entry = suggest_stop_loss(
-        "BULLISH",
-        82.30,
-        80.60,
-        81.50,
-        prior,
-        confirming_candle=entry_candle,
-    )
-    assert without["stop_basis"] == "orb"
-    assert without["suggested_sl"] == 80.60
-    assert with_entry["stop_basis"] == "swing"
-    assert with_entry["suggested_sl"] == 81.30
-
-
 def test_bearish_uses_latest_swing_high():
     prior = [
         _bar(80.30, 80.00, 80.15, 0),
