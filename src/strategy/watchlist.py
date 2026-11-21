@@ -5,7 +5,7 @@ import pytz
 
 from src.broker import fyers_client
 from src.strategy.indices import is_index
-from src.strategy.runtime_settings import load_settings
+from src.strategy.runtime_settings import load_settings, tracked_symbols
 from src.utils import db
 from src.utils.logger import get_logger
 from src.utils.quote_price import quote_filter_price
@@ -30,10 +30,7 @@ class WatchlistManager:
         """
         today = datetime.now(IST).strftime("%Y-%m-%d")
         settings = load_settings()
-        symbols = list(settings.symbols)
-        for symbol in settings.index_symbols or []:
-            if symbol not in symbols:
-                symbols.append(symbol)
+        symbols = tracked_symbols(settings)
         db.delete_watchlist(today)
 
         if not symbols:

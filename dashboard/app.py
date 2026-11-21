@@ -26,6 +26,7 @@ from src.strategy.runtime_settings import (
     load_settings,
     normalize_symbol,
     save_settings,
+    tracked_symbols,
     update_index_symbols,
     update_watchlist,
 )
@@ -287,7 +288,17 @@ qualified = sum(1 for r in _day_rows if r["passed_filter"])
 
 st.title("ORB control")
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("Tracking", len(st.session_state.symbols) + len(st.session_state.get("index_symbols") or []))
+_preview = StrategySettings(
+    symbols=list(st.session_state.symbols),
+    max_price_enabled=settings.max_price_enabled,
+    max_stock_price=settings.max_stock_price,
+    orb_range_threshold=settings.orb_range_threshold,
+    orb_duration_minutes=settings.orb_duration_minutes,
+    breakout_timeframe_minutes=settings.breakout_timeframe_minutes,
+    index_symbols=list(st.session_state.get("index_symbols") or []),
+    universe=settings.universe,
+)
+m1.metric("Tracking", len(tracked_symbols(_preview)))
 m2.metric("Fyers token", "OK" if token_ok else "Login needed")
 m3.metric("Qualified today", qualified)
 m4.metric("Breakouts today", len(db.get_signals(today)))
@@ -387,60 +398,119 @@ with tab_list:
 # ── Strategy ───────────────────────────────────────────────────────────────────
 
 with tab_rules:
+    st.subheader("Entry")
+    e1, e2 = st.columns(2)
+    live_entry = e1.selectbox(
+        "Entry",
+        options=["direct", "retest"],
+        index=0 if settings.entry_mode == "direct" else 1,
+        format_func=lambda key: "Direct breakout" if key == "direct" else "Retest",
+        key="live_entry",
+    )
+    live_retest_window = e2.selectbox(
+        "Second break within",
+        options=list(RETEST_WINDOWS),
+        index=list(RETEST_WINDOWS).index(settings.retest_within_minutes)
+        if settings.retest_within_minutes in RETEST_WINDOWS
+        else 1,
+        format_func=lambda m: f"{m} minutes of the first break",
+        disabled=live_entry != "retest",
+        key="live_retest_window",
+    )
     with st.form("strategy_form", clear_on_submit=False):
-        st.subheader("ORB rules")
-        c1, c2 = st.columns(2)
-        with c1:
-            price_on = st.toggle("Price filter", value=settings.max_price_enabled)
-            max_price = st.number_input(
-                "Max price (₹)",
-                min_value=1.0,
-                value=float(settings.max_stock_price),
-                step=10.0,
-                disabled=not price_on,
-            )
-            threshold = st.number_input(
-                "ORB range (%)",
-                min_value=0.05,
-                max_value=20.0,
-                value=float(settings.orb_range_threshold),
-                step=0.05,
-                format="%.2f",
-            )
-            range_mode = st.selectbox(
-                "Range qualifies when",
-                options=list(RANGE_MODES),
-                index=list(RANGE_MODES).index(settings.orb_range_mode),
-                format_func=_range_mode_label,
-            )
-        with c2:
-            duration = st.selectbox(
-                "Opening range from 09:15",
-                options=list(ORB_DURATIONS),
-                index=list(ORB_DURATIONS).index(settings.orb_duration_minutes),
-                format_func=_duration_label,
-            )
-            timeframe = st.selectbox(
-                "Breakout candle size",
-                options=list(BREAKOUT_TIMEFRAMES),
-                index=list(BREAKOUT_TIMEFRAMES).index(settings.breakout_timeframe_minutes),
-                format_func=lambda m: f"{m} minutes",
-            )
-            cutoff = st.time_input(
-                "No entry after",
-                value=_cutoff_value(settings.entry_cutoff),
-                step=timedelta(minutes=5),
-            )
-            track_retest = st.toggle("Also alert retest entries", value=settings.track_retest)
-            retest_window = st.selectbox(
-                "Retest must break again within",
-                options=list(RETEST_WINDOWS),
-                index=list(RETEST_WINDOWS).index(settings.retest_within_minutes)
-                if settings.retest_within_minutes in RETEST_WINDOWS
-                else 1,
-                format_func=lambda m: f"{m} minutes of the first break",
-                disabled=not track_retest,
-            )
+        st.subheader("Symbols")
+        s1, s2 = st.columns(2)
+        live_universe = s1.selectbox(
+            "Symbols",
+            options=["watchlist", "indices", "both"],
+            index=["watchlist", "indices", "both"].index(settings.universe)
+            if settings.universe in ("watchlist", "indices", "both")
+            else 0,
+            format_func=lambda key: {"watchlist": "Equity watchlist", "indices": "Indices", "both": "Both lists"}[key],
+            key="live_universe",
+        )
+        cutoff = s2.time_input(
+            "No entry after",
+            value=_cutoff_value(settings.entry_cutoff),
+            step=timedelta(minutes=5),
+            key="live_cutoff",
+        )
+        st.subheader("Opening range")
+        o1, o2, o3 = st.columns(3)
+        duration = o1.selectbox(
+            "Opening range from 09:15",
+            options=list(ORB_DURATIONS),
+            index=list(ORB_DURATIONS).index(settings.orb_duration_minutes),
+            format_func=_duration_label,
+            key="live_duration",
+        )
+        timeframe = o2.selectbox(
+            "Breakout candle size",
+            options=list(BREAKOUT_TIMEFRAMES),
+            index=list(BREAKOUT_TIMEFRAMES).index(settings.breakout_timeframe_minutes),
+            format_func=lambda m: f"{m} minutes",
+            key="live_timeframe",
+        )
+        threshold = o3.number_input(
+            "ORB range (%)",
+            min_value=0.05,
+            max_value=20.0,
+            value=float(settings.orb_range_threshold),
+            step=0.05,
+            format="%.2f",
+            key="live_threshold",
+        )
+        range_mode = st.selectbox(
+            "Range qualifies when",
+            options=list(RANGE_MODES),
+            index=list(RANGE_MODES).index(settings.orb_range_mode),
+            format_func=_range_mode_label,
+            key="live_range_mode",
+        )
+        st.subheader("Risk")
+        k1, k2, k3, k4 = st.columns(4)
+        live_capital = k1.number_input(
+            "Capital (₹)", min_value=1000.0, value=float(settings.capital), step=10_000.0, key="live_capital"
+        )
+        live_margin = k2.selectbox(
+            "Margin",
+            options=[4, 5, 10],
+            index=[4, 5, 10].index(int(settings.margin_multiplier)) if int(settings.margin_multiplier) in (4, 5, 10) else 1,
+            format_func=lambda n: f"{n}×",
+            key="live_margin",
+        )
+        live_risk = k3.number_input(
+            "Risk per trade (%)", min_value=0.1, max_value=10.0, value=float(settings.risk_pct), step=0.1, key="live_risk"
+        )
+        live_day_risk = k4.number_input(
+            "Risk per day (%)",
+            min_value=0.1,
+            max_value=20.0,
+            value=float(settings.day_risk_pct),
+            step=0.1,
+            key="live_day_risk",
+        )
+        k5, k6, k7, k8 = st.columns(4)
+        live_rrr = k5.number_input(
+            "Reward : risk", min_value=0.5, max_value=10.0, value=float(settings.rrr), step=0.5, key="live_rrr"
+        )
+        live_max_trades = k6.number_input(
+            "Max trades per day",
+            min_value=1,
+            max_value=20,
+            value=int(settings.max_trades_per_day),
+            step=1,
+            key="live_max_trades",
+        )
+        price_on = k7.toggle("Price filter", value=settings.max_price_enabled, key="live_price_on")
+        max_price = k8.number_input(
+            "Max price (₹)",
+            min_value=1.0,
+            value=float(settings.max_stock_price),
+            step=10.0,
+            disabled=not price_on,
+            key="live_max_price",
+        )
 
         st.divider()
         st.subheader("Actions")
@@ -468,8 +538,15 @@ with tab_rules:
             breakout_timeframe_minutes=int(timeframe),
             entry_cutoff=cutoff.strftime("%H:%M"),
             index_symbols=list(st.session_state.index_symbols),
-            track_retest=bool(track_retest),
-            retest_within_minutes=int(retest_window),
+            entry_mode=live_entry,
+            retest_within_minutes=int(live_retest_window),
+            universe=live_universe,
+            capital=float(live_capital),
+            margin_multiplier=float(live_margin),
+            risk_pct=float(live_risk),
+            day_risk_pct=float(live_day_risk),
+            max_trades_per_day=int(live_max_trades),
+            rrr=float(live_rrr),
         )
 
     if save:
@@ -626,14 +703,19 @@ with tab_backtest:
     bt_entry_mode = e1.selectbox(
         "Entry",
         options=["direct", "retest"],
+        index=0 if settings.entry_mode == "direct" else 1,
         format_func=lambda key: "Direct breakout" if key == "direct" else "Retest",
+        key="bt_entry",
     )
     bt_retest_window = e2.selectbox(
         "Second break within",
         options=list(RETEST_WINDOWS),
-        index=1,
+        index=list(RETEST_WINDOWS).index(settings.retest_within_minutes)
+        if settings.retest_within_minutes in RETEST_WINDOWS
+        else 1,
         format_func=lambda m: f"{m} minutes of the first break",
         disabled=bt_entry_mode != "retest",
+        key="bt_retest_window",
     )
     st.subheader("Months")
     y1, y2 = st.columns([1, 3])
@@ -656,12 +738,17 @@ with tab_backtest:
         bt_universe = s1.selectbox(
             "Symbols",
             options=["watchlist", "indices", "both"],
+            index=["watchlist", "indices", "both"].index(settings.universe)
+            if settings.universe in ("watchlist", "indices", "both")
+            else 0,
             format_func=lambda key: {"watchlist": "Equity watchlist", "indices": "Indices", "both": "Both lists"}[key],
+            key="bt_universe",
         )
         bt_cutoff = s2.time_input(
             "No entry after",
             value=_cutoff_value(settings.entry_cutoff),
             step=timedelta(minutes=5),
+            key="bt_cutoff",
         )
 
         st.subheader("Opening range")
@@ -671,12 +758,14 @@ with tab_backtest:
             options=list(ORB_DURATIONS),
             index=list(ORB_DURATIONS).index(settings.orb_duration_minutes),
             format_func=_duration_label,
+            key="bt_duration",
         )
         bt_timeframe = o2.selectbox(
             "Breakout candle size",
             options=list(BREAKOUT_TIMEFRAMES),
             index=list(BREAKOUT_TIMEFRAMES).index(settings.breakout_timeframe_minutes),
             format_func=lambda m: f"{m} minutes",
+            key="bt_timeframe",
         )
         bt_threshold = o3.number_input(
             "ORB range (%)",
@@ -685,30 +774,59 @@ with tab_backtest:
             value=float(settings.orb_range_threshold),
             step=0.05,
             format="%.2f",
+            key="bt_threshold",
         )
         bt_range_mode = st.selectbox(
             "Range qualifies when",
             options=list(RANGE_MODES),
             index=list(RANGE_MODES).index(settings.orb_range_mode),
             format_func=_range_mode_label,
+            key="bt_range_mode",
         )
 
         st.subheader("Risk")
         k1, k2, k3, k4 = st.columns(4)
-        bt_capital = k1.number_input("Capital (₹)", min_value=1000.0, value=100_000.0, step=10_000.0)
-        bt_margin = k2.selectbox("Margin", options=[4, 5, 10], index=1, format_func=lambda n: f"{n}×")
-        bt_risk = k3.number_input("Risk per trade (%)", min_value=0.1, max_value=10.0, value=1.0, step=0.1)
-        bt_day_risk = k4.number_input("Risk per day (%)", min_value=0.1, max_value=20.0, value=3.0, step=0.1)
+        bt_capital = k1.number_input(
+            "Capital (₹)", min_value=1000.0, value=float(settings.capital), step=10_000.0, key="bt_capital"
+        )
+        bt_margin = k2.selectbox(
+            "Margin",
+            options=[4, 5, 10],
+            index=[4, 5, 10].index(int(settings.margin_multiplier)) if int(settings.margin_multiplier) in (4, 5, 10) else 1,
+            format_func=lambda n: f"{n}×",
+            key="bt_margin",
+        )
+        bt_risk = k3.number_input(
+            "Risk per trade (%)", min_value=0.1, max_value=10.0, value=float(settings.risk_pct), step=0.1, key="bt_risk"
+        )
+        bt_day_risk = k4.number_input(
+            "Risk per day (%)",
+            min_value=0.1,
+            max_value=20.0,
+            value=float(settings.day_risk_pct),
+            step=0.1,
+            key="bt_day_risk",
+        )
         k5, k6, k7, k8 = st.columns(4)
-        bt_rrr = k5.number_input("Reward : risk", min_value=0.5, max_value=10.0, value=2.0, step=0.5)
-        bt_max_trades = k6.number_input("Max trades per day", min_value=1, max_value=20, value=2, step=1)
-        bt_price_on = k7.toggle("Price filter", value=settings.max_price_enabled)
+        bt_rrr = k5.number_input(
+            "Reward : risk", min_value=0.5, max_value=10.0, value=float(settings.rrr), step=0.5, key="bt_rrr"
+        )
+        bt_max_trades = k6.number_input(
+            "Max trades per day",
+            min_value=1,
+            max_value=20,
+            value=int(settings.max_trades_per_day),
+            step=1,
+            key="bt_max_trades",
+        )
+        bt_price_on = k7.toggle("Price filter", value=settings.max_price_enabled, key="bt_price_on")
         bt_max_price = k8.number_input(
             "Max price (₹)",
             min_value=1.0,
             value=float(settings.max_stock_price),
             step=10.0,
             disabled=not bt_price_on,
+            key="bt_max_price",
         )
         b1, b2 = st.columns(2)
         run_bt = b1.form_submit_button("Run selected months", type="primary")

@@ -34,14 +34,14 @@ class BreakoutDetector:
         *,
         breakout_minutes: int = 15,
         entry_cutoff: str = "15:15",
-        track_retest: bool = False,
+        entry_mode: str = "direct",
         retest_within_minutes: int = 30,
     ):
         self._orb = orb_levels
         self._callback = on_breakout_callback
         self._breakout_minutes = breakout_minutes
         self._entry_cutoff = entry_cutoff
-        self._track_retest = track_retest
+        self._entry_mode = entry_mode if entry_mode in ("direct", "retest") else "direct"
         self._retest_within = retest_within_minutes
         self._prior_candles: dict[str, list[dict]] = defaultdict(list)
 
@@ -112,8 +112,10 @@ class BreakoutDetector:
             }
             self._callback(signal)
 
-        # ── BULLISH ──────────────────────────────────────────────────────────
-        if too_late:
+        # ── Direct breakout ─────────────────────────────────────────────────
+        if self._entry_mode == "retest":
+            pass
+        elif too_late:
             logger.info("Skipped %s — breakout close is after the %s entry cutoff.", symbol, self._entry_cutoff)
         elif close > orb_high:
             if not db.has_signal_fired(today, symbol, "BULLISH") and \
@@ -137,7 +139,7 @@ class BreakoutDetector:
                 _emit("BEARISH", orb_low, move_pct)
 
         if (
-            self._track_retest
+            self._entry_mode == "retest"
             and isinstance(candle.get("candle_start"), datetime)
             and not db.has_entry_fired(today, symbol, "retest")
         ):

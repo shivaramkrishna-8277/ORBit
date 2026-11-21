@@ -105,6 +105,14 @@ _DDL = [
         index_symbols_json           TEXT    NOT NULL DEFAULT '["NSE:NIFTY50-INDEX"]',
         track_retest                 INTEGER NOT NULL DEFAULT 0,
         retest_within_minutes        INTEGER NOT NULL DEFAULT 30,
+        entry_mode                   TEXT    NOT NULL DEFAULT 'retest',
+        universe                     TEXT    NOT NULL DEFAULT 'watchlist',
+        capital                      REAL    NOT NULL DEFAULT 40000,
+        margin_multiplier            REAL    NOT NULL DEFAULT 5,
+        risk_pct                     REAL    NOT NULL DEFAULT 1.5,
+        day_risk_pct                 REAL    NOT NULL DEFAULT 3,
+        max_trades_per_day           INTEGER NOT NULL DEFAULT 2,
+        rrr                          REAL    NOT NULL DEFAULT 2,
         orb_duration_minutes         INTEGER NOT NULL,
         breakout_timeframe_minutes   INTEGER NOT NULL,
         updated_at                   TEXT    NOT NULL
@@ -146,6 +154,19 @@ def _migrate_settings_columns(con: sqlite3.Connection) -> None:
         con.execute(
             "ALTER TABLE strategy_settings ADD COLUMN retest_within_minutes INTEGER NOT NULL DEFAULT 30"
         )
+    additions = (
+        ("entry_mode", "TEXT NOT NULL DEFAULT 'retest'"),
+        ("universe", "TEXT NOT NULL DEFAULT 'watchlist'"),
+        ("capital", "REAL NOT NULL DEFAULT 40000"),
+        ("margin_multiplier", "REAL NOT NULL DEFAULT 5"),
+        ("risk_pct", "REAL NOT NULL DEFAULT 1.5"),
+        ("day_risk_pct", "REAL NOT NULL DEFAULT 3"),
+        ("max_trades_per_day", "INTEGER NOT NULL DEFAULT 2"),
+        ("rrr", "REAL NOT NULL DEFAULT 2"),
+    )
+    for name, col_type in additions:
+        if name not in existing:
+            con.execute(f"ALTER TABLE strategy_settings ADD COLUMN {name} {col_type}")
 
 
 def _migrate_signals_columns(con: sqlite3.Connection) -> None:
@@ -377,15 +398,24 @@ def save_strategy_settings(
     index_symbols_json: str = '["NSE:NIFTY50-INDEX"]',
     track_retest: int = 0,
     retest_within_minutes: int = 30,
+    entry_mode: str = "retest",
+    universe: str = "watchlist",
+    capital: float = 40_000,
+    margin_multiplier: float = 5,
+    risk_pct: float = 1.5,
+    day_risk_pct: float = 3,
+    max_trades_per_day: int = 2,
+    rrr: float = 2,
 ) -> None:
     with _conn() as con:
         con.execute(
             """INSERT INTO strategy_settings (
                    id, symbols_json, max_price_enabled, max_stock_price,
                    orb_range_threshold, orb_range_mode, entry_cutoff, index_symbols_json,
-                   track_retest, retest_within_minutes, orb_duration_minutes,
-                   breakout_timeframe_minutes, updated_at
-               ) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?)
+                   track_retest, retest_within_minutes, entry_mode, universe, capital,
+                   margin_multiplier, risk_pct, day_risk_pct, max_trades_per_day, rrr,
+                   orb_duration_minutes, breakout_timeframe_minutes, updated_at
+               ) VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                    symbols_json=excluded.symbols_json,
                    max_price_enabled=excluded.max_price_enabled,
@@ -396,6 +426,14 @@ def save_strategy_settings(
                    index_symbols_json=excluded.index_symbols_json,
                    track_retest=excluded.track_retest,
                    retest_within_minutes=excluded.retest_within_minutes,
+                   entry_mode=excluded.entry_mode,
+                   universe=excluded.universe,
+                   capital=excluded.capital,
+                   margin_multiplier=excluded.margin_multiplier,
+                   risk_pct=excluded.risk_pct,
+                   day_risk_pct=excluded.day_risk_pct,
+                   max_trades_per_day=excluded.max_trades_per_day,
+                   rrr=excluded.rrr,
                    orb_duration_minutes=excluded.orb_duration_minutes,
                    breakout_timeframe_minutes=excluded.breakout_timeframe_minutes,
                    updated_at=excluded.updated_at""",
@@ -409,6 +447,14 @@ def save_strategy_settings(
                 index_symbols_json,
                 track_retest,
                 retest_within_minutes,
+                entry_mode,
+                universe,
+                capital,
+                margin_multiplier,
+                risk_pct,
+                day_risk_pct,
+                max_trades_per_day,
+                rrr,
                 orb_duration_minutes,
                 breakout_timeframe_minutes,
                 updated_at,

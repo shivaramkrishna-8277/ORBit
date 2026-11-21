@@ -41,6 +41,14 @@ class StrategySettings:
     index_symbols: list[str] | None = None
     track_retest: bool = False
     retest_within_minutes: int = 30
+    entry_mode: str = "retest"
+    universe: str = "watchlist"
+    capital: float = 40_000
+    margin_multiplier: float = 5
+    risk_pct: float = 1.5
+    day_risk_pct: float = 3
+    max_trades_per_day: int = 2
+    rrr: float = 2
     updated_at: str = ""
 
     @property
@@ -91,6 +99,23 @@ def validate_settings(settings: StrategySettings) -> StrategySettings:
     settings.entry_cutoff = cutoff.strftime("%H:%M")
     if settings.retest_within_minutes not in RETEST_WINDOWS:
         raise ValueError("Retest window must be 15, 30, or 60 minutes.")
+    if settings.entry_mode not in ("direct", "retest"):
+        raise ValueError("Entry must be a direct breakout or a retest.")
+    if settings.universe not in ("watchlist", "indices", "both"):
+        raise ValueError("Symbols must be the equity watchlist, indices, or both.")
+    if settings.capital <= 0:
+        raise ValueError("Capital must be greater than 0.")
+    if settings.margin_multiplier not in (4, 5, 10):
+        raise ValueError("Margin must be 4×, 5×, or 10×.")
+    if not 0 < settings.risk_pct <= 10:
+        raise ValueError("Risk per trade must be greater than 0 and at most 10%.")
+    if not 0 < settings.day_risk_pct <= 20:
+        raise ValueError("Risk per day must be greater than 0 and at most 20%.")
+    if settings.max_trades_per_day < 1:
+        raise ValueError("Max trades per day must be at least 1.")
+    if settings.rrr <= 0:
+        raise ValueError("Reward to risk must be greater than 0.")
+    settings.track_retest = settings.entry_mode == "retest"
     from src.strategy.indices import INDEX_CATALOG
 
     allowed = {symbol for symbol, _label in INDEX_CATALOG}
@@ -108,20 +133,28 @@ def validate_settings(settings: StrategySettings) -> StrategySettings:
 
 def default_settings() -> StrategySettings:
     """Match the bot's previous fixed rules until the dashboard changes them."""
-    from src.config import MAX_STOCK_PRICE, NIFTY50_SYMBOLS, ORB_RANGE_THRESHOLD
+    from src.config import MAX_STOCK_PRICE, NIFTY50_SYMBOLS
 
     return StrategySettings(
         symbols=sorted(NIFTY50_SYMBOLS),
         max_price_enabled=True,
         max_stock_price=float(MAX_STOCK_PRICE),
-        orb_range_threshold=float(ORB_RANGE_THRESHOLD),
+        orb_range_threshold=0.7,
         orb_range_mode="lte",
-        orb_duration_minutes=15,
-        breakout_timeframe_minutes=15,
+        orb_duration_minutes=60,
+        breakout_timeframe_minutes=5,
         entry_cutoff="15:15",
         index_symbols=["NSE:NIFTY50-INDEX"],
-        track_retest=False,
+        track_retest=True,
         retest_within_minutes=30,
+        entry_mode="retest",
+        universe="watchlist",
+        capital=40_000,
+        margin_multiplier=5,
+        risk_pct=1.5,
+        day_risk_pct=3,
+        max_trades_per_day=2,
+        rrr=2,
         updated_at="",
     )
 
@@ -139,6 +172,14 @@ def _settings_from_row(row: dict) -> StrategySettings:
         index_symbols=json.loads(row["index_symbols_json"]) if row.get("index_symbols_json") else ["NSE:NIFTY50-INDEX"],
         track_retest=bool(row.get("track_retest") or 0),
         retest_within_minutes=int(row.get("retest_within_minutes") or 30),
+        entry_mode=str(row.get("entry_mode") or ("retest" if row.get("track_retest") else "direct")),
+        universe=str(row.get("universe") or "watchlist"),
+        capital=float(row.get("capital") or 40_000),
+        margin_multiplier=float(row.get("margin_multiplier") or 5),
+        risk_pct=float(row.get("risk_pct") or 1.5),
+        day_risk_pct=float(row.get("day_risk_pct") or 3),
+        max_trades_per_day=int(row.get("max_trades_per_day") or 2),
+        rrr=float(row.get("rrr") or 2),
         updated_at=row["updated_at"],
     )
 
@@ -154,8 +195,16 @@ def _settings_to_dict(settings: StrategySettings) -> dict:
         "breakout_timeframe_minutes": settings.breakout_timeframe_minutes,
         "entry_cutoff": settings.entry_cutoff,
         "index_symbols": list(settings.index_symbols or []),
-        "track_retest": settings.track_retest,
+        "track_retest": settings.entry_mode == "retest",
         "retest_within_minutes": settings.retest_within_minutes,
+        "entry_mode": settings.entry_mode,
+        "universe": settings.universe,
+        "capital": settings.capital,
+        "margin_multiplier": settings.margin_multiplier,
+        "risk_pct": settings.risk_pct,
+        "day_risk_pct": settings.day_risk_pct,
+        "max_trades_per_day": settings.max_trades_per_day,
+        "rrr": settings.rrr,
         "updated_at": settings.updated_at,
     }
 
@@ -186,6 +235,14 @@ def _read_json_backup() -> StrategySettings | None:
             index_symbols=list(data.get("index_symbols") or ["NSE:NIFTY50-INDEX"]),
             track_retest=bool(data.get("track_retest") or False),
             retest_within_minutes=int(data.get("retest_within_minutes") or 30),
+            entry_mode=str(data.get("entry_mode") or ("retest" if data.get("track_retest") else "direct")),
+            universe=str(data.get("universe") or "watchlist"),
+            capital=float(data.get("capital") or 40_000),
+            margin_multiplier=float(data.get("margin_multiplier") or 5),
+            risk_pct=float(data.get("risk_pct") or 1.5),
+            day_risk_pct=float(data.get("day_risk_pct") or 3),
+            max_trades_per_day=int(data.get("max_trades_per_day") or 2),
+            rrr=float(data.get("rrr") or 2),
             updated_at=str(data.get("updated_at", "")),
         )
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
@@ -224,11 +281,31 @@ def save_settings(settings: StrategySettings) -> StrategySettings:
         updated_at=settings.updated_at,
         entry_cutoff=settings.entry_cutoff,
         index_symbols_json=json.dumps(list(settings.index_symbols or [])),
-        track_retest=int(bool(settings.track_retest)),
+        track_retest=int(settings.entry_mode == "retest"),
         retest_within_minutes=int(settings.retest_within_minutes),
+        entry_mode=settings.entry_mode,
+        universe=settings.universe,
+        capital=float(settings.capital),
+        margin_multiplier=float(settings.margin_multiplier),
+        risk_pct=float(settings.risk_pct),
+        day_risk_pct=float(settings.day_risk_pct),
+        max_trades_per_day=int(settings.max_trades_per_day),
+        rrr=float(settings.rrr),
     )
     _write_json_backup(settings)
     return settings
+
+
+def tracked_symbols(settings: StrategySettings) -> list[str]:
+    """Equity watchlist, indices, or both, following the saved symbol choice."""
+    chosen: list[str] = []
+    if settings.universe in ("watchlist", "both"):
+        chosen.extend(settings.symbols)
+    if settings.universe in ("indices", "both"):
+        for symbol in settings.index_symbols or []:
+            if symbol not in chosen:
+                chosen.append(symbol)
+    return chosen
 
 
 def update_index_symbols(symbols: list[str]) -> StrategySettings:

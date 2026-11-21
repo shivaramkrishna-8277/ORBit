@@ -301,6 +301,48 @@ class TestBreakoutDetector:
         assert signal["orb_stop"] == 80.60
 
     @patch("src.strategy.breakout_detector.db")
+    def test_retest_mode_waits_for_the_second_break(self, mock_db):
+        from src.strategy.breakout_detector import BreakoutDetector
+
+        mock_db.has_signal_fired.return_value = False
+        mock_db.has_entry_fired.return_value = False
+        mock_db.insert_signal.return_value = 1
+        callback = MagicMock()
+        detector = BreakoutDetector(
+            orb_levels={"NSE:SBIN-EQ": {"orb_high": 500.0, "orb_low": 497.0}},
+            on_breakout_callback=callback,
+            entry_mode="retest",
+            retest_within_minutes=30,
+        )
+        detector.check_candle("NSE:SBIN-EQ", self._make_candle(close=501.0, candle_start=ist(9, 20)))
+        detector.check_candle("NSE:SBIN-EQ", self._make_candle(close=498.5, candle_start=ist(9, 25)))
+        callback.assert_not_called()
+        detector.check_candle("NSE:SBIN-EQ", self._make_candle(close=502.0, candle_start=ist(9, 30)))
+        callback.assert_called_once()
+        signal = callback.call_args[0][0]
+        assert signal["entry_style"] == "retest"
+        assert signal["signal_type"] == "BULLISH"
+
+    @patch("src.strategy.breakout_detector.db")
+    def test_direct_mode_does_not_emit_a_retest(self, mock_db):
+        from src.strategy.breakout_detector import BreakoutDetector
+
+        mock_db.has_signal_fired.side_effect = [False, False, True, True]
+        mock_db.has_entry_fired.return_value = False
+        mock_db.insert_signal.return_value = 1
+        callback = MagicMock()
+        detector = BreakoutDetector(
+            orb_levels={"NSE:SBIN-EQ": {"orb_high": 500.0, "orb_low": 497.0}},
+            on_breakout_callback=callback,
+            entry_mode="direct",
+        )
+        detector.check_candle("NSE:SBIN-EQ", self._make_candle(close=501.0, candle_start=ist(9, 20)))
+        detector.check_candle("NSE:SBIN-EQ", self._make_candle(close=498.5, candle_start=ist(9, 25)))
+        detector.check_candle("NSE:SBIN-EQ", self._make_candle(close=502.0, candle_start=ist(9, 30)))
+        callback.assert_called_once()
+        assert callback.call_args[0][0]["entry_style"] == "direct"
+
+    @patch("src.strategy.breakout_detector.db")
     def test_duplicate_bullish_signal_fires_only_once(self, mock_db):
         from src.strategy.breakout_detector import BreakoutDetector
         # First candle: BULLISH=False, BEARISH=False → fires.  Second candle: BULLISH=True → blocked.
