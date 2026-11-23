@@ -1149,30 +1149,52 @@ with tab_backtest:
                         use_container_width=True,
                     )
 
-                header = st.columns([1.15, 0.9, 0.85, 0.7, 0.8, 0.8, 0.8, 0.7, 0.95, 0.7, 0.55, 0.45])
+                header = st.columns(
+                    [1.1, 1.05, 0.75, 0.65, 0.72, 0.72, 0.72, 0.55, 0.65, 0.82, 0.65, 0.5, 0.62, 0.4]
+                )
                 for col, name in zip(
                     header,
-                    ["Date", "Symbol", "Side", "Entry", "Price", "Stop", "Target", "Exit", "Why", "P&L", "R", ""],
+                    [
+                        "Date",
+                        "Symbol",
+                        "Side",
+                        "Entry",
+                        "Price",
+                        "Stop",
+                        "Target",
+                        "Qty",
+                        "Exit",
+                        "Why",
+                        "P&L",
+                        "R",
+                        "",
+                    ],
                 ):
                     col.caption(name)
                 with st.container(height=460):
                     for trade in shown:
-                        cols = st.columns([1.15, 0.9, 0.85, 0.7, 0.8, 0.8, 0.8, 0.7, 0.95, 0.7, 0.55, 0.45])
+                        cols = st.columns(
+                            [1.1, 1.05, 0.75, 0.65, 0.72, 0.72, 0.72, 0.55, 0.65, 0.82, 0.65, 0.5, 0.62, 0.4]
+                        )
                         cols[0].write(trade["date"])
                         leg = trade.get("trade_leg", "open")
                         symbol_cell = trade["ticker"] if leg == "open" else f"↳ {trade['ticker']}"
                         cols[1].write(symbol_cell)
+                        if trade.get("add_capped_by_margin"):
+                            asked = int(trade.get("add_qty_requested") or trade["qty"])
+                            cols[1].caption(f"Add capped by margin ({trade['qty']:,} of {asked:,} asked)")
                         cols[2].write(trade["side"].title())
                         cols[3].write(trade["entry_time"])
                         cols[4].write(f"{trade['entry']:.2f}")
                         cols[5].write(f"{trade['stop']:.2f}")
                         cols[6].write(f"{trade['target']:.2f}")
-                        cols[7].write(trade["exit_time"])
-                        cols[8].write(exit_label(trade["exit_reason"]))
-                        cols[9].write(f"{trade['pnl']:,.0f}")
-                        cols[10].write(f"{trade['r_multiple']:.2f}")
+                        cols[7].write(f"{int(trade['qty']):,}")
+                        cols[8].write(trade["exit_time"])
+                        cols[9].write(exit_label(trade["exit_reason"]))
+                        cols[10].write(f"{trade['pnl']:,.0f}")
+                        cols[11].write(f"{trade['r_multiple']:.2f}")
                         chart_key = f"chart_{trade['date']}_{trade['symbol']}_{trade['entry_time']}"
-                        if cols[11].button("📈", key=chart_key, help="Chart"):
+                        if cols[13].button("📈", key=chart_key, help="Chart"):
                             _trade_chart(trade)
             else:
                 st.caption("No trades.")

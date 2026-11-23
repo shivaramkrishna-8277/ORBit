@@ -269,6 +269,35 @@ def test_trailing_scales_in_and_lists_open_plus_add_rows():
     assert parent["exit_reason"] == "target"
     assert child["exit_reason"] == "target"
     assert child["stop"] == parent["entry"]
+    assert parent["qty"] > 0
+    assert child["qty"] > 0
+
+
+def test_trailing_marks_add_capped_when_margin_is_tight():
+    bars = _session(101.0, 400, next_low=102.0, next_high=103.0, next_open=102.0)
+    for bar in bars:
+        when = bar["datetime"]
+        if when.hour == 9 and 35 <= when.minute <= 39:
+            bar["open"] = 102.0
+            bar["low"] = max(float(bar["low"]), 101.5)
+            bar["close"] = 102.0
+    follow = _flat((9, 40), 5, 104.0, 80)
+    follow[0] = (9, 40, 104.0, 105.0, 103.5, 104.5, 80)
+    bars = bars + _minutes(follow)
+    result = _run(
+        {"NSE:AAA-EQ": bars},
+        trailing_enabled=True,
+        trailing_trigger_pct=50.0,
+        trailing_add_pct=100.0,
+        sizing_capital=5_000,
+        margin_multiplier=1.1,
+        risk_pct=1.0,
+        max_trades=1,
+    )
+    child = next((r for r in result["trade_rows"] if r.get("trade_leg") == "add"), None)
+    assert child is not None
+    assert child.get("add_capped_by_margin") is True
+    assert child["qty"] < child["add_qty_requested"]
 
 
 def test_retest_enters_on_the_second_break_not_the_first():

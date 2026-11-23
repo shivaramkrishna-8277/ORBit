@@ -338,6 +338,9 @@ def manage_day(
         }
         if leg == "add":
             row["parent_key"] = pos.get("parent_key")
+            if pos.get("add_capped_by_margin"):
+                row["add_capped_by_margin"] = True
+                row["add_qty_requested"] = int(pos.get("add_qty_requested") or pos["qty"])
         else:
             row["trade_key"] = pos.get("trade_key")
         if pos.get("scaled"):
@@ -352,13 +355,15 @@ def manage_day(
             return None
         breakeven = float(pos["entry"])
         trigger_px = _milestone_price(pos["side"], pos["entry"], pos["target"], trailing_trigger_pct)
-        add_qty = max(0, math.floor(pos["qty"] * (trailing_add_pct / 100.0)))
+        requested_add_qty = max(0, math.floor(pos["qty"] * (trailing_add_pct / 100.0)))
+        add_qty = requested_add_qty
         if add_qty < 1:
             pos["scaled"] = True
             pos["stop"] = breakeven
             return None
         room = buying_power - used_margin
         by_margin = math.floor(room / trigger_px) if trigger_px > 0 else 0
+        capped = by_margin < requested_add_qty
         add_qty = min(add_qty, by_margin)
         if add_qty < 1:
             pos["scaled"] = True
@@ -384,6 +389,8 @@ def manage_day(
             "planned_risk": add_qty * distance,
             "trade_leg": "add",
             "parent_key": pos.get("trade_key"),
+            "add_capped_by_margin": capped,
+            "add_qty_requested": requested_add_qty,
         }
 
     def _process_exits(positions: list[dict]) -> list[dict]:
