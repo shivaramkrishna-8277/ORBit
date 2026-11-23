@@ -33,6 +33,8 @@ class BacktestRequest:
     trailing_enabled: bool = False
     trailing_trigger_pct: float = 50.0
     trailing_add_pct: float = 50.0
+    brokerage_open: float = 50.0
+    brokerage_add: float = 50.0
 
 
 def score_trades(trades: list[dict]) -> dict:
@@ -63,6 +65,8 @@ def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=No
         raise ValueError("Capital and RRR must be positive.")
     if request.max_trades_per_day < 1:
         raise ValueError("Max trades per day must be at least 1.")
+    if request.brokerage_open < 0 or request.brokerage_add < 0:
+        raise ValueError("Brokerage cannot be negative.")
     if request.trailing_enabled:
         if not 1 <= request.trailing_trigger_pct <= 99:
             raise ValueError("Trail trigger must be between 1% and 99% of the distance to target.")
@@ -135,6 +139,8 @@ def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=No
             trailing_enabled=request.trailing_enabled,
             trailing_trigger_pct=request.trailing_trigger_pct,
             trailing_add_pct=request.trailing_add_pct,
+            brokerage_open=request.brokerage_open,
+            brokerage_add=request.brokerage_add,
         )
         equity_end = equity + result["pnl"]
         daily.append(
@@ -156,6 +162,7 @@ def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=No
 
     scored = score_trades(trades)
     gross = equity - request.capital
+    total_brokerage = sum(float(row.get("brokerage") or 0) for row in trades)
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "sessions": len(days),
@@ -166,6 +173,9 @@ def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=No
         "session_closes": scored["session_closes"],
         "win_rate": scored["win_rate"],
         "gross_pnl": gross,
+        "total_brokerage": total_brokerage,
+        "brokerage_open": request.brokerage_open,
+        "brokerage_add": request.brokerage_add,
         "ending_equity": equity,
         "max_drawdown": max_drawdown,
         "avg_r": scored["avg_r"],

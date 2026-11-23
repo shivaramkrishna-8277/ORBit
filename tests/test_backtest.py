@@ -75,6 +75,8 @@ def _run(bars_by_symbol, **overrides):
         max_price_enabled=False,
         max_stock_price=10_000,
         orb_range_threshold=5.0,
+        brokerage_open=0.0,
+        brokerage_add=0.0,
     )
     params.update(overrides)
     return simulate_day(DAY, bars_by_symbol, **params)
@@ -298,6 +300,36 @@ def test_trailing_marks_add_capped_when_margin_is_tight():
     assert child is not None
     assert child.get("add_capped_by_margin") is True
     assert child["qty"] < child["add_qty_requested"]
+
+
+def test_brokerage_differs_for_open_and_trailing_legs():
+    open_only = _run(
+        {"NSE:AAA-EQ": _session(101.0, 400, next_low=100.5, next_high=110.0)},
+        brokerage_open=50.0,
+        brokerage_add=25.0,
+    )
+    assert open_only["trade_rows"][0]["brokerage"] == 50.0
+    bars = _session(101.0, 400, next_low=102.0, next_high=103.0, next_open=102.0)
+    for bar in bars:
+        when = bar["datetime"]
+        if when.hour == 9 and 35 <= when.minute <= 39:
+            bar["open"] = 102.0
+            bar["low"] = max(float(bar["low"]), 101.5)
+            bar["close"] = 102.0
+    follow = _flat((9, 40), 5, 104.0, 80)
+    follow[0] = (9, 40, 104.0, 105.0, 103.5, 104.5, 80)
+    result = _run(
+        {"NSE:AAA-EQ": bars + _minutes(follow)},
+        trailing_enabled=True,
+        brokerage_open=40.0,
+        brokerage_add=60.0,
+        sizing_capital=100_000,
+        margin_multiplier=10,
+    )
+    parent = next(r for r in result["trade_rows"] if r.get("trade_leg") == "open")
+    child = next(r for r in result["trade_rows"] if r.get("trade_leg") == "add")
+    assert parent["brokerage"] == 40.0
+    assert child["brokerage"] == 60.0
 
 
 def test_retest_enters_on_the_second_break_not_the_first():

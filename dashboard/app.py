@@ -851,8 +851,23 @@ with tab_backtest:
             key="bt_trail_add",
         )
         b1, b2 = st.columns(2)
-        run_bt = b1.form_submit_button("Run selected months", type="primary")
-        run_year = b2.form_submit_button("This year, fresh each month")
+        bt_brokerage_open = b1.number_input(
+            "Brokerage — open leg (₹, entry + exit)",
+            min_value=0.0,
+            value=50.0,
+            step=10.0,
+            key="bt_brokerage_open",
+        )
+        bt_brokerage_add = b2.number_input(
+            "Brokerage — trailing add leg (₹, entry + exit)",
+            min_value=0.0,
+            value=50.0,
+            step=10.0,
+            key="bt_brokerage_add",
+        )
+        b3, b4 = st.columns(2)
+        run_bt = b3.form_submit_button("Run selected months", type="primary")
+        run_year = b4.form_submit_button("This year, fresh each month")
 
     if run_bt or run_year:
         if bt_universe == "indices":
@@ -897,6 +912,8 @@ with tab_backtest:
                     trailing_enabled=bool(bt_trailing),
                     trailing_trigger_pct=float(bt_trail_trigger),
                     trailing_add_pct=float(bt_trail_add),
+                    brokerage_open=float(bt_brokerage_open),
+                    brokerage_add=float(bt_brokerage_add),
                 )
 
             if run_year:
@@ -1011,6 +1028,13 @@ with tab_backtest:
         st.subheader("Report")
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Gross P&L", f"₹{report['gross_pnl']:,.0f}")
+        if report.get("total_brokerage"):
+            open_fee = report.get("brokerage_open", 0)
+            add_fee = report.get("brokerage_add", 0)
+            st.caption(
+                f"Brokerage included: ₹{report['total_brokerage']:,.0f} total "
+                f"(open leg ₹{open_fee:,.0f}, trailing add leg ₹{add_fee:,.0f} per round trip)"
+            )
         k2.metric("Trades", report["trades"])
         k3.metric("Win rate", f"{report['win_rate']:.1f}%")
         k4.metric("Max drawdown", f"₹{report['max_drawdown']:,.0f}")

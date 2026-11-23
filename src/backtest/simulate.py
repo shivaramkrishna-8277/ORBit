@@ -229,6 +229,8 @@ def simulate_day(
     trailing_enabled: bool = False,
     trailing_trigger_pct: float = 50.0,
     trailing_add_pct: float = 50.0,
+    brokerage_open: float = 50.0,
+    brokerage_add: float = 50.0,
 ) -> dict:
     """Simulate one session. Sizing capital is already capped by the caller."""
     day_dt = IST.localize(datetime(day.year, day.month, day.day, 9, 15))
@@ -275,6 +277,8 @@ def simulate_day(
         trailing_enabled=trailing_enabled,
         trailing_trigger_pct=trailing_trigger_pct,
         trailing_add_pct=trailing_add_pct,
+        brokerage_open=brokerage_open,
+        brokerage_add=brokerage_add,
     )
 
 
@@ -294,6 +298,8 @@ def manage_day(
     trailing_enabled: bool = False,
     trailing_trigger_pct: float = 50.0,
     trailing_add_pct: float = 50.0,
+    brokerage_open: float = 50.0,
+    brokerage_add: float = 50.0,
 ) -> dict:
     """Turn ready signals into trades. Exits use the breakout candles, then the 15:15 close."""
     buying_power = sizing_capital * margin_multiplier
@@ -311,11 +317,14 @@ def manage_day(
 
     def _close(pos: dict, exit_px: float, reason: str, when: datetime) -> None:
         nonlocal realized_loss
-        pnl = _pnl(pos["side"], pos["entry"], exit_px, pos["qty"])
+        gross_pnl = _pnl(pos["side"], pos["entry"], exit_px, pos["qty"])
+        leg = pos.get("trade_leg", "open")
+        fee = brokerage_add if leg == "add" else brokerage_open
+        brokerage = float(fee) if fee > 0 else 0.0
+        pnl = gross_pnl - brokerage
         if pnl < 0:
             realized_loss += -pnl
         risk = pos["planned_risk"] or 1.0
-        leg = pos.get("trade_leg", "open")
         row = {
             "date": day.isoformat(),
             "symbol": pos["symbol"],
@@ -330,6 +339,8 @@ def manage_day(
             "exit": exit_px,
             "exit_reason": reason,
             "qty": pos["qty"],
+            "pnl_gross": gross_pnl,
+            "brokerage": brokerage,
             "pnl": pnl,
             "r_multiple": pnl / risk,
             "orb_high": pos.get("orb_high"),
