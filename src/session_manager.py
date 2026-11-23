@@ -396,6 +396,12 @@ class SessionManager:
                 logger.info("Dashboard recalculation finished: %s", detail)
             elif action == "fyers_auth":
                 self._run_dashboard_fyers_auth(command_id)
+            elif action == "sheet_batch":
+                from src.backtest.sheet_job import run_sheet_batch_command
+
+                detail = run_sheet_batch_command(command_id)
+                self._finish_dashboard_command(command_id, "done", detail)
+                logger.info("Combination sheet job finished: %s", detail)
             else:
                 self._finish_dashboard_command(command_id, "error", f"Unknown action: {action}")
         except Exception as exc:

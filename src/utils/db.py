@@ -462,14 +462,22 @@ def save_strategy_settings(
         )
 
 
-def enqueue_command(action: str, created_at: str) -> int:
+def enqueue_command(action: str, created_at: str, detail: str = "") -> int:
     with _conn() as con:
         cur = con.execute(
             """INSERT INTO dashboard_commands (action, status, detail, created_at)
-               VALUES (?, 'pending', '', ?)""",
-            (action, created_at),
+               VALUES (?, 'pending', ?, ?)""",
+            (action, detail, created_at),
         )
         return int(cur.lastrowid)
+
+
+def update_command_detail(command_id: int, detail: str) -> None:
+    with _conn() as con:
+        con.execute(
+            "UPDATE dashboard_commands SET detail=? WHERE id=?",
+            (detail, command_id),
+        )
 
 
 def claim_next_command() -> dict | None:
@@ -504,6 +512,15 @@ def latest_command() -> dict | None:
     with _conn() as con:
         row = con.execute(
             "SELECT * FROM dashboard_commands ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_command(command_id: int) -> dict | None:
+    with _conn() as con:
+        row = con.execute(
+            "SELECT * FROM dashboard_commands WHERE id=?",
+            (command_id,),
         ).fetchone()
     return dict(row) if row else None
 

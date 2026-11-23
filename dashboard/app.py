@@ -631,66 +631,6 @@ with tab_day:
 
     _live_status()
 
-def _run_combination_sheet(data: bytes, replace_filled: bool, progress) -> bytes:
-    """Run the Combinations sheet (or legacy Stage 1 sheets). Each month starts at that row's capital."""
-    from io import BytesIO
-
-    from openpyxl import load_workbook
-
-    from src.backtest.history import load_watchlist_minutes, merge_bar_store, range_is_cached, slice_bars
-    from src.backtest.sheet_batch import fill_workbook, needed_universes, sheet_windows
-    from src.backtest.sheet_fast import iter_sheet_results
-    from src.broker.auth import get_access_token
-    from src.broker.fyers_client import get_client
-
-    windows = sheet_windows(datetime.now(IST).date())
-    if not windows:
-        raise ValueError("2026 has not started, so there are no months to fill.")
-    token = get_access_token(allow_oauth=False)
-    client = get_client(token)
-    needed = needed_universes(load_workbook(BytesIO(data)), replace_filled)
-    bars_by_universe: dict[str, dict] = {}
-    for universe in sorted(needed):
-        symbols = list(st.session_state.index_symbols if universe == "indices" else st.session_state.symbols)
-        if not symbols:
-            label = "index list" if universe == "indices" else "equity watchlist"
-            raise ValueError(f"The {label} is empty.")
-        start, end = windows[0][0], windows[-1][1]
-        store = st.session_state.get("bt_hist_store")
-        if range_is_cached(store, symbols, start, end):
-            progress(f"Using cached {universe} history. No download.")
-            bars = slice_bars(store["bars"], start, end)
-        else:
-            bars = load_watchlist_minutes(client, symbols, start, end, progress=progress)
-            st.session_state.bt_hist_store = merge_bar_store(store, symbols, start, end, bars)
-        bars_by_universe[universe] = bars
-        progress(f"{universe} history ready ({len(symbols)} symbols).")
-
-    progress("History loaded. Starting workbook scoring…")
-
-    def _run_many(pending):
-        return iter_sheet_results(pending, bars_by_universe, windows, progress)
-
-    checkpoint_path = ROOT / "data" / "sheet_runs" / "combinations_filled.xlsx"
-
-    def _checkpoint(payload: bytes) -> None:
-        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-        checkpoint_path.write_bytes(payload)
-        st.session_state.sheet_batch_bytes = payload
-        st.session_state.sheet_batch_note = "Progress is saved in the download. Upload that file again to continue."
-
-    payload, done, skipped = fill_workbook(
-        data,
-        progress=progress,
-        replace_filled=replace_filled,
-        checkpoint=_checkpoint,
-        run_many=_run_many,
-    )
-    st.session_state.sheet_batch_bytes = payload
-    st.session_state.sheet_batch_note = f"Filled {done} setups. Left {skipped} that already had January."
-    return payload
-
-
 # ── Backtest ───────────────────────────────────────────────────────────────────
 
 with tab_backtest:
@@ -1270,31 +1210,56 @@ with tab_backtest:
         "Upload ORB_Combinations.xlsx (Combinations sheet). January–November 2026 months are filled from each row's settings. "
         "Each row uses its own capital, margin, RRR, trailing, brokerage, and cutoff from the sheet; each month restarts at that row's capital. "
         "Total P&L, profitable months, worst month, and win rate stay as formulas. "
-        "A finished row is skipped, so you can upload the same file again to continue."
+        "Runs on the server in the background (orbot) — you do not need to keep this page open. "
+        "A finished row is skipped unless Replace is on; you can upload a partially filled file to continue."
     )
     sheet_file = st.file_uploader("Workbook", type=["xlsx"], key="bt_sheet_upload")
     replace_sheet = st.checkbox("Replace rows that already have January filled")
-    if st.button("Run every setup in the sheet", type="primary", disabled=sheet_file is None):
+    sheet_busy = db.has_active_command("sheet_batch")
+    if st.button(
+        "Start on server (background)",
+        type="primary",
+        disabled=sheet_file is None or sheet_busy,
+    ):
         if not is_token_valid():
             st.error("Fyers token is missing. Use Strategy → Telegram: new Fyers login, then run again.")
         else:
             try:
-                with st.status("Running the sheet…", expanded=True) as status:
-                    note = st.empty()
-                    _run_combination_sheet(sheet_file.getvalue(), replace_sheet, note.write)
-                    status.update(label="Sheet finished", state="complete")
+                from src.backtest.sheet_job import enqueue_sheet_batch
+
+                job_id = enqueue_sheet_batch(sheet_file.getvalue(), replace_sheet)
+                st.success(
+                    f"Job #{job_id} queued on the server. You can close this browser — orbot will fill the sheet. "
+                    "Reopen Backtest later to download the result."
+                )
             except Exception as exc:
                 st.error(str(exc))
+    elif sheet_busy:
+        st.info("A combination sheet job is already running or waiting in the queue.")
+
+    sheet_cmd = db.latest_command_for("sheet_batch")
+    if sheet_cmd:
+        detail_text = sheet_cmd.get("detail") or ""
+        try:
+            import json
+
+            detail = json.loads(detail_text)
+            progress = detail.get("progress") or detail_text
+        except json.JSONDecodeError:
+            progress = detail_text
+        st.caption(f"Latest server job: #{sheet_cmd['id']} · {sheet_cmd['status']} · {progress}")
+
     saved_sheet = ROOT / "data" / "sheet_runs" / "combinations_filled.xlsx"
-    if not st.session_state.get("sheet_batch_bytes") and saved_sheet.exists():
-        st.session_state.sheet_batch_bytes = saved_sheet.read_bytes()
-        st.session_state.sheet_batch_note = "This is the last saved sheet. Rows with January filled are already done."
-    if st.session_state.get("sheet_batch_note"):
-        st.caption(st.session_state.sheet_batch_note)
-    if st.session_state.get("sheet_batch_bytes"):
+    if saved_sheet.exists():
+        st.caption(
+            f"Latest output on disk: {saved_sheet.name} "
+            f"({saved_sheet.stat().st_size // 1024} KB, updated {datetime.fromtimestamp(saved_sheet.stat().st_mtime).strftime('%Y-%m-%d %H:%M')})"
+        )
         st.download_button(
             "Download filled workbook",
-            data=st.session_state.sheet_batch_bytes,
+            data=saved_sheet.read_bytes(),
             file_name="ORB_Combinations_filled.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
+    elif sheet_cmd and sheet_cmd.get("status") in ("pending", "running"):
+        st.caption("The filled file will appear here when the server job finishes.")
