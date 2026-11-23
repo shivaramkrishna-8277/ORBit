@@ -397,6 +397,8 @@ def fill_workbook(
     present = _result_sheets(workbook)
     if not present:
         raise ValueError(f"The file needs a {COMBINATIONS_SHEET} sheet or the legacy Stage 1 sheets.")
+    if progress:
+        progress("Reading combination rows from the workbook…")
     setups = read_setups(workbook)
     if not setups:
         raise ValueError("That sheet has no setups to run.")
@@ -413,6 +415,13 @@ def fill_workbook(
                 progress(f"Skipped {setup.setup_id} ({index}/{len(setups)}), January is already filled.")
             continue
         pending.append(setup)
+
+    if progress:
+        progress(f"Queued {len(pending)} setups to run · skipped {skipped} already filled.")
+    if not pending:
+        buffer = BytesIO()
+        workbook.save(buffer)
+        return buffer.getvalue(), done, skipped
 
     def _write(setup: SheetSetup, results) -> None:
         nonlocal done

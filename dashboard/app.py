@@ -664,6 +664,9 @@ def _run_combination_sheet(data: bytes, replace_filled: bool, progress) -> bytes
             bars = load_watchlist_minutes(client, symbols, start, end, progress=progress)
             st.session_state.bt_hist_store = merge_bar_store(store, symbols, start, end, bars)
         bars_by_universe[universe] = bars
+        progress(f"{universe} history ready ({len(symbols)} symbols).")
+
+    progress("History loaded. Starting workbook scoring…")
 
     def _run_many(pending):
         return iter_sheet_results(pending, bars_by_universe, windows, progress)
@@ -1265,8 +1268,8 @@ with tab_backtest:
     st.subheader("Combination sheet")
     st.caption(
         "Upload ORB_Combinations.xlsx (Combinations sheet). January–November 2026 months are filled from each row's settings. "
-        "each month starting again at ₹1,00,000. Capital, margin 5×, reward:risk 2, no entry after 11:59, and the price filter off "
-        "come from the sheet. Total P&L, profitable months, worst month, and win rate stay as formulas. "
+        "Each row uses its own capital, margin, RRR, trailing, brokerage, and cutoff from the sheet; each month restarts at that row's capital. "
+        "Total P&L, profitable months, worst month, and win rate stay as formulas. "
         "A finished row is skipped, so you can upload the same file again to continue."
     )
     sheet_file = st.file_uploader("Workbook", type=["xlsx"], key="bt_sheet_upload")
@@ -1282,7 +1285,7 @@ with tab_backtest:
                     status.update(label="Sheet finished", state="complete")
             except Exception as exc:
                 st.error(str(exc))
-    saved_sheet = ROOT / "data" / "sheet_runs" / "stage1_filled.xlsx"
+    saved_sheet = ROOT / "data" / "sheet_runs" / "combinations_filled.xlsx"
     if not st.session_state.get("sheet_batch_bytes") and saved_sheet.exists():
         st.session_state.sheet_batch_bytes = saved_sheet.read_bytes()
         st.session_state.sheet_batch_note = "This is the last saved sheet. Rows with January filled are already done."
@@ -1292,6 +1295,6 @@ with tab_backtest:
         st.download_button(
             "Download filled workbook",
             data=st.session_state.sheet_batch_bytes,
-            file_name="stage1_filled.xlsx",
+            file_name="ORB_Combinations_filled.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )

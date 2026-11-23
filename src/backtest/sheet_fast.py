@@ -215,8 +215,14 @@ def iter_sheet_results(
     groups: dict[tuple, list[SheetSetup]] = defaultdict(list)
     for setup in setups:
         groups[(setup.universe, setup.orb_minutes, setup.breakout_minutes, setup.entry_cutoff, setup.rrr)].append(setup)
+    total_setups = len(setups)
+    scored = 0
+    if progress:
+        progress("Indexing cached history by session date…")
     indexed = {name: index_days(bars) for name, bars in bars_by_universe.items()}
     total = len(groups)
+    if progress:
+        progress(f"Scoring {total_setups} setups in {total} shared candle groups…")
     for index, ((universe, orb_minutes, breakout_minutes, entry_cutoff, rrr), group) in enumerate(groups.items(), start=1):
         if progress:
             progress(
@@ -225,11 +231,21 @@ def iter_sheet_results(
             )
         days = indexed.get(universe, {})
         packs: dict[date, list[_Prepared]] = {}
+        day_count = 0
         for start, end in windows:
             for day in trading_days(start, end):
-                if day in days:
-                    packs[day] = _prepare_day(days[day], day, orb_minutes, breakout_minutes, entry_cutoff, rrr)
+                if day not in days:
+                    continue
+                packs[day] = _prepare_day(days[day], day, orb_minutes, breakout_minutes, entry_cutoff, rrr)
+                day_count += 1
+                if progress and day_count % 25 == 0:
+                    progress(
+                        f"Preparing group {index}/{total} · built candles for {day_count} sessions through {day.isoformat()}"
+                    )
+        if progress:
+            progress(f"Preparing group {index}/{total} · {day_count} sessions ready · scoring {len(group)} rows")
         for setup in group:
+            scored += 1
             if progress:
-                progress(f"Scoring {setup.setup_id}")
+                progress(f"Scoring {setup.setup_id} ({scored}/{total_setups})")
             yield setup.setup_id, [_month_result(setup, packs, start, end) for start, end in windows]
