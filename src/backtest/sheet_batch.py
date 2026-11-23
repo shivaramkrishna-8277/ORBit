@@ -1,21 +1,20 @@
-"""Fill Stage 1 backtest workbooks. Formula columns are left untouched."""
+"""Fill ORB combination workbooks. Formula columns are left untouched."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from io import BytesIO
 
 from openpyxl import load_workbook
 
 from src.backtest.months import month_window
 
-RESULT_SHEETS = ("Stage1_Direct", "Stage1B_Retest")
+COMBINATIONS_SHEET = "Combinations"
+LEGACY_SHEETS = ("Stage1_Direct", "Stage1B_Retest")
 SHEET_YEAR = 2026
 SHEET_LAST_MONTH = 11
-CAPITAL = 100_000.0
-MARGIN = 5.0
-RRR = 2.0
-ENTRY_CUTOFF = "11:59"
+DEFAULT_MAX_PRICE = 900.0
 
 _ENTRY = {"direct breakout": "direct", "retest": "retest"}
 _WINDOW = {
@@ -28,6 +27,7 @@ _UNIVERSE = {"equity watchlist": "watchlist", "indices": "indices"}
 _ORB = {"5 minutes": 5, "15 minutes": 15, "30 minutes": 30, "1 hour": 60}
 _CANDLE = {"1 minute": 1, "5 minutes": 5}
 _RANGE = {"greater than or equal": "gte", "less than or equal": "lte"}
+_TOGGLE = {"off": False, "on": True}
 
 _MONTH_HEADERS = {
     1: "Jan P&L",
@@ -43,6 +43,17 @@ _MONTH_HEADERS = {
     11: "Nov P&L",
 }
 _FORMULA_HEADERS = ("Total P&L", "Profitable months", "Worst month", "Win rate (T/(T+S))")
+
+# Backward-compatible aliases used in older two-sheet workbooks.
+_COLUMN_ALIASES: dict[str, tuple[str, ...]] = {
+    "Opening range (from 9:15)": ("Opening range (from 09:15)", "Opening range (from 9:15)"),
+    "Breakout candle": ("Breakout candle size", "Breakout candle"),
+    "Risk/trade %": ("Risk per trade %", "Risk/trade %"),
+    "Risk/day %": ("Risk per day %", "Risk/day %"),
+    "Max trades/day": ("Max trades per day", "Max trades/day"),
+}
+
+_MARGIN_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*x$", re.I)
 
 
 @dataclass
@@ -60,6 +71,17 @@ class SheetSetup:
     risk_pct: float
     day_risk_pct: float
     max_trades: int
+    rrr: float = 2.0
+    capital: float = 100_000.0
+    margin_multiplier: float = 5.0
+    entry_cutoff: str = "11:59"
+    max_price_enabled: bool = False
+    max_stock_price: float = DEFAULT_MAX_PRICE
+    trailing_enabled: bool = False
+    trailing_trigger_pct: float = 50.0
+    trailing_add_pct: float = 50.0
+    brokerage_open: float = 50.0
+    brokerage_add: float = 50.0
 
 
 @dataclass
@@ -91,12 +113,51 @@ def sheet_windows(today: date, year: int = SHEET_YEAR) -> list[tuple[date, date]
     return windows
 
 
-def _headers(ws) -> dict[str, int]:
-    found = {}
-    for cell in ws[1]:
-        if cell.value:
-            found[str(cell.value).strip()] = cell.column
-    missing = [name for name in ("ID", "Entry", *_MONTH_HEADERS.values(), "Total Trades", "Worst Max DD") if name not in found]
+def _header_row(ws) -> dict[str, int]:
+    return {str(cell.value).strip(): cell.column for cell in ws[1] if cell.value is not None}
+
+
+def _resolve(headers: dict[str, int], canonical: str) -> str:
+    if canonical in headers:
+        return canonical
+    for alias in _COLUMN_ALIASES.get(canonical, ()):
+        if alias in headers:
+            return alias
+    raise KeyError(canonical)
+
+
+def _headers(ws, *, combinations: bool) -> dict[str, int]:
+    found = _header_row(ws)
+    required = ["ID", "Entry", *_MONTH_HEADERS.values(), "Total Trades", "Worst Max DD"]
+    if combinations:
+        required.extend(
+            [
+                "Second break within",
+                "Symbols",
+                _resolve(found, "Opening range (from 9:15)"),
+                _resolve(found, "Breakout candle"),
+                "ORB range %",
+                "Range qualifies when",
+                _resolve(found, "Risk/trade %"),
+                _resolve(found, "Risk/day %"),
+                _resolve(found, "Max trades/day"),
+            ]
+        )
+    else:
+        required.extend(
+            [
+                "Second break within",
+                "Symbols",
+                _resolve(found, "Opening range (from 9:15)"),
+                _resolve(found, "Breakout candle"),
+                "ORB range %",
+                "Range qualifies when",
+                _resolve(found, "Risk/trade %"),
+                _resolve(found, "Risk/day %"),
+                _resolve(found, "Max trades/day"),
+            ]
+        )
+    missing = [name for name in required if name not in found]
     if missing:
         raise ValueError(f"{ws.title} is missing columns: {', '.join(missing)}")
     return found
@@ -116,44 +177,126 @@ def _choice(raw, mapping: dict, label: str, setup_id: str):
     return mapping[key]
 
 
+def _margin_multiplier(raw, setup_id: str) -> float:
+    text = str(raw or "5x").strip().lower()
+    match = _MARGIN_RE.match(text)
+    if match:
+        return float(match.group(1))
+    if text in ("4", "5", "10"):
+        return float(text)
+    raise ValueError(f"{setup_id}: Margin '{raw}' is not understood.")
+
+
+def _cutoff_text(raw) -> str:
+    if isinstance(raw, datetime):
+        return raw.strftime("%H:%M")
+    if isinstance(raw, time):
+        return raw.strftime("%H:%M")
+    text = str(raw or "11:59").strip()
+    if len(text) >= 5 and text[2] == ":":
+        return text[:5]
+    return "11:59"
+
+
+def _optional_number(raw, default: float) -> float:
+    text = str(raw or "").strip().lower()
+    if text in ("", "n/a"):
+        return default
+    return float(raw)
+
+
+def _parse_setup_row(
+    sheet: str,
+    row: int,
+    row_values: tuple,
+    headers: dict[str, int],
+    *,
+    combinations: bool,
+) -> SheetSetup:
+    setup_id = _cell(row_values, headers, "ID")
+    if setup_id is None or str(setup_id).strip() == "":
+        raise ValueError("blank id")
+    setup_id = str(setup_id).strip()
+    entry = _choice(_cell(row_values, headers, "Entry"), _ENTRY, "Entry", setup_id)
+    window = _choice(_cell(row_values, headers, "Second break within"), _WINDOW, "Second break within", setup_id)
+    orb_key = _resolve(headers, "Opening range (from 9:15)")
+    candle_key = _resolve(headers, "Breakout candle")
+    risk_key = _resolve(headers, "Risk/trade %")
+    day_risk_key = _resolve(headers, "Risk/day %")
+    max_trades_key = _resolve(headers, "Max trades/day")
+
+    trailing_enabled = False
+    trailing_trigger_pct = 50.0
+    trailing_add_pct = 50.0
+    capital = 100_000.0
+    margin_multiplier = 5.0
+    entry_cutoff = "11:59"
+    rrr = 2.0
+    max_price_enabled = False
+    brokerage_open = 0.0
+    brokerage_add = 0.0
+
+    if combinations:
+        trailing_enabled = _choice(_cell(row_values, headers, "Trailing stop loss"), _TOGGLE, "Trailing stop loss", setup_id)
+        if trailing_enabled:
+            trailing_trigger_pct = _optional_number(_cell(row_values, headers, "% of distance to target"), 50.0)
+            trailing_add_pct = _optional_number(_cell(row_values, headers, "Add size % of open qty"), 50.0)
+        capital = float(_cell(row_values, headers, "Capital"))
+        margin_multiplier = _margin_multiplier(_cell(row_values, headers, "Margin"), setup_id)
+        entry_cutoff = _cutoff_text(_cell(row_values, headers, "No entry after"))
+        max_price_enabled = _choice(_cell(row_values, headers, "Price filter"), _TOGGLE, "Price filter", setup_id)
+        rrr = float(_cell(row_values, headers, "Reward : risk"))
+        brokerage_open = float(_cell(row_values, headers, "Brokerage open leg"))
+        brokerage_add = float(_cell(row_values, headers, "Brokerage add leg"))
+
+    return SheetSetup(
+        sheet=sheet,
+        row=row,
+        setup_id=setup_id,
+        entry_mode=entry,
+        retest_within_minutes=window,
+        universe=_choice(_cell(row_values, headers, "Symbols"), _UNIVERSE, "Symbols", setup_id),
+        orb_minutes=_choice(_cell(row_values, headers, orb_key), _ORB, "Opening range", setup_id),
+        breakout_minutes=_choice(_cell(row_values, headers, candle_key), _CANDLE, "Breakout candle", setup_id),
+        orb_range_threshold=float(_cell(row_values, headers, "ORB range %")),
+        orb_range_mode=_choice(_cell(row_values, headers, "Range qualifies when"), _RANGE, "Range qualifies when", setup_id),
+        risk_pct=float(_cell(row_values, headers, risk_key)),
+        day_risk_pct=float(_cell(row_values, headers, day_risk_key)),
+        max_trades=int(_cell(row_values, headers, max_trades_key)),
+        rrr=rrr,
+        capital=capital,
+        margin_multiplier=margin_multiplier,
+        entry_cutoff=entry_cutoff,
+        max_price_enabled=max_price_enabled,
+        trailing_enabled=trailing_enabled,
+        trailing_trigger_pct=trailing_trigger_pct,
+        trailing_add_pct=trailing_add_pct,
+        brokerage_open=brokerage_open,
+        brokerage_add=brokerage_add,
+    )
+
+
+def _result_sheets(workbook) -> tuple[str, ...]:
+    if COMBINATIONS_SHEET in workbook.sheetnames:
+        return (COMBINATIONS_SHEET,)
+    present = tuple(name for name in LEGACY_SHEETS if name in workbook.sheetnames)
+    return present
+
+
 def read_setups(workbook) -> list[SheetSetup]:
     setups: list[SheetSetup] = []
-    for name in RESULT_SHEETS:
-        if name not in workbook.sheetnames:
-            continue
+    for name in _result_sheets(workbook):
         ws = workbook[name]
-        headers = _headers(ws)
+        combinations = name == COMBINATIONS_SHEET
+        headers = _headers(ws, combinations=combinations)
         for cells in ws.iter_rows(min_row=2, max_row=ws.max_row):
             row_values = tuple(cell.value for cell in cells)
-            setup_id = _cell(row_values, headers, "ID")
-            if setup_id is None or str(setup_id).strip() == "":
-                continue
-            setup_id = str(setup_id).strip()
-            entry = _choice(_cell(row_values, headers, "Entry"), _ENTRY, "Entry", setup_id)
-            window = _choice(_cell(row_values, headers, "Second break within"), _WINDOW, "Second break within", setup_id)
-            setups.append(
-                SheetSetup(
-                    sheet=name,
-                    row=cells[0].row,
-                    setup_id=setup_id,
-                    entry_mode=entry,
-                    retest_within_minutes=window,
-                    universe=_choice(_cell(row_values, headers, "Symbols"), _UNIVERSE, "Symbols", setup_id),
-                    orb_minutes=_choice(
-                        _cell(row_values, headers, "Opening range (from 9:15)"), _ORB, "Opening range", setup_id
-                    ),
-                    breakout_minutes=_choice(
-                        _cell(row_values, headers, "Breakout candle"), _CANDLE, "Breakout candle", setup_id
-                    ),
-                    orb_range_threshold=float(_cell(row_values, headers, "ORB range %")),
-                    orb_range_mode=_choice(
-                        _cell(row_values, headers, "Range qualifies when"), _RANGE, "Range qualifies when", setup_id
-                    ),
-                    risk_pct=float(_cell(row_values, headers, "Risk/trade %")),
-                    day_risk_pct=float(_cell(row_values, headers, "Risk/day %")),
-                    max_trades=int(_cell(row_values, headers, "Max trades/day")),
-                )
-            )
+            try:
+                setups.append(_parse_setup_row(name, cells[0].row, row_values, headers, combinations=combinations))
+            except ValueError as exc:
+                if "blank id" in str(exc):
+                    continue
+                raise
     return setups
 
 
@@ -163,7 +306,7 @@ def _filled(ws, headers: dict[str, int], row: int) -> bool:
 
 
 def run_setup_months(setup: SheetSetup, symbols: list[str], windows: list[tuple[date, date]], bars: dict) -> list[MonthResult]:
-    """Fresh capital each month. Price filter stays off, matching the sheet's fixed settings."""
+    """Fresh capital each month."""
     from src.backtest.engine import BacktestRequest, run_backtest
     from src.backtest.history import slice_bars
 
@@ -178,19 +321,24 @@ def run_setup_months(setup: SheetSetup, symbols: list[str], windows: list[tuple[
                 orb_range_threshold=setup.orb_range_threshold,
                 orb_duration_minutes=setup.orb_minutes,
                 breakout_timeframe_minutes=setup.breakout_minutes,
-                max_price_enabled=False,
-                max_stock_price=1,
-                capital=CAPITAL,
-                margin_multiplier=MARGIN,
+                max_price_enabled=setup.max_price_enabled,
+                max_stock_price=setup.max_stock_price,
+                capital=setup.capital,
+                margin_multiplier=setup.margin_multiplier,
                 risk_pct=setup.risk_pct,
                 day_risk_pct=setup.day_risk_pct,
                 max_trades_per_day=setup.max_trades,
-                rrr=RRR,
+                rrr=setup.rrr,
                 orb_range_mode=setup.orb_range_mode,
-                entry_cutoff=ENTRY_CUTOFF,
+                entry_cutoff=setup.entry_cutoff,
                 entry_mode=setup.entry_mode,
                 retest_within_minutes=setup.retest_within_minutes,
                 include_months=((start.year, start.month),),
+                trailing_enabled=setup.trailing_enabled,
+                trailing_trigger_pct=setup.trailing_trigger_pct,
+                trailing_add_pct=setup.trailing_add_pct,
+                brokerage_open=setup.brokerage_open,
+                brokerage_add=setup.brokerage_add,
             ),
             minute_bars=slice_bars(bars, start, end),
         )
@@ -225,7 +373,8 @@ def needed_universes(workbook, replace_filled: bool) -> set[str]:
     needed: set[str] = set()
     for setup in read_setups(workbook):
         ws = workbook[setup.sheet]
-        if replace_filled or not _filled(ws, _headers(ws), setup.row):
+        combinations = setup.sheet == COMBINATIONS_SHEET
+        if replace_filled or not _filled(ws, _headers(ws, combinations=combinations), setup.row):
             needed.add(setup.universe)
     return needed
 
@@ -239,24 +388,25 @@ def fill_workbook(
     run_many=None,
 ) -> tuple[bytes, int, int]:
     """
-    Run every Stage1_Direct and Stage1B_Retest row.
+    Run every row on the Combinations sheet (or legacy Stage 1 sheets).
 
     `run_one(setup)` returns one MonthResult per month that has started.
     Columns Total P&L, Profitable months, Worst month, and Win rate are formulas and stay blank.
     """
     workbook = load_workbook(BytesIO(data))
-    present = [name for name in RESULT_SHEETS if name in workbook.sheetnames]
+    present = _result_sheets(workbook)
     if not present:
-        raise ValueError("The file needs a Stage1_Direct or Stage1B_Retest sheet.")
+        raise ValueError(f"The file needs a {COMBINATIONS_SHEET} sheet or the legacy Stage 1 sheets.")
     setups = read_setups(workbook)
     if not setups:
-        raise ValueError("Those sheets have no setups to run.")
+        raise ValueError("That sheet has no setups to run.")
     done = 0
     skipped = 0
     pending = []
     for index, setup in enumerate(setups, start=1):
         ws = workbook[setup.sheet]
-        headers = _headers(ws)
+        combinations = setup.sheet == COMBINATIONS_SHEET
+        headers = _headers(ws, combinations=combinations)
         if not replace_filled and _filled(ws, headers, setup.row):
             skipped += 1
             if progress:
@@ -266,7 +416,8 @@ def fill_workbook(
 
     def _write(setup: SheetSetup, results) -> None:
         nonlocal done
-        write_results(workbook[setup.sheet], _headers(workbook[setup.sheet]), setup.row, list(results))
+        ws = workbook[setup.sheet]
+        write_results(ws, _headers(ws, combinations=setup.sheet == COMBINATIONS_SHEET), setup.row, list(results))
         done += 1
         if checkpoint and (done % 10 == 0 or done == len(pending)):
             snapshot = BytesIO()

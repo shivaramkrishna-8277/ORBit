@@ -632,7 +632,7 @@ with tab_day:
     _live_status()
 
 def _run_combination_sheet(data: bytes, replace_filled: bool, progress) -> bytes:
-    """Run Stage1_Direct and Stage1B_Retest. Each month starts at ₹1,00,000."""
+    """Run the Combinations sheet (or legacy Stage 1 sheets). Each month starts at that row's capital."""
     from io import BytesIO
 
     from openpyxl import load_workbook
@@ -668,7 +668,7 @@ def _run_combination_sheet(data: bytes, replace_filled: bool, progress) -> bytes
     def _run_many(pending):
         return iter_sheet_results(pending, bars_by_universe, windows, progress)
 
-    checkpoint_path = ROOT / "data" / "sheet_runs" / "stage1_filled.xlsx"
+    checkpoint_path = ROOT / "data" / "sheet_runs" / "combinations_filled.xlsx"
 
     def _checkpoint(payload: bytes) -> None:
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1264,7 +1264,7 @@ with tab_backtest:
     st.divider()
     st.subheader("Combination sheet")
     st.caption(
-        "Upload the backtest workbook. Stage1_Direct and Stage1B_Retest are filled for January–November 2026, "
+        "Upload ORB_Combinations.xlsx (Combinations sheet). January–November 2026 months are filled from each row's settings. "
         "each month starting again at ₹1,00,000. Capital, margin 5×, reward:risk 2, no entry after 11:59, and the price filter off "
         "come from the sheet. Total P&L, profitable months, worst month, and win rate stay as formulas. "
         "A finished row is skipped, so you can upload the same file again to continue."

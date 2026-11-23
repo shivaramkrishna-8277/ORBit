@@ -6,14 +6,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from src.backtest.engine import score_trades
-from src.backtest.sheet_batch import (
-    CAPITAL,
-    ENTRY_CUTOFF,
-    MARGIN,
-    RRR,
-    MonthResult,
-    SheetSetup,
-)
+from src.backtest.sheet_batch import MonthResult, SheetSetup
 from src.backtest.simulate import _signal_from_candles, manage_day
 from src.strategy.intraday_agg import market_open, session_end
 from src.utils.market_calendar import trading_days
@@ -106,6 +99,8 @@ def _prepare_day(
     day: date,
     orb_minutes: int,
     breakout_minutes: int,
+    entry_cutoff: str,
+    rrr: float,
 ) -> list[_Prepared]:
     day_dt = market_open(datetime(day.year, day.month, day.day))
     prepared: list[_Prepared] = []
@@ -120,10 +115,10 @@ def _prepare_day(
                 orb,
                 candles,
                 breakout_minutes=breakout_minutes,
-                entry_cutoff=ENTRY_CUTOFF,
+                entry_cutoff=entry_cutoff,
                 entry_mode="direct",
                 retest_within_minutes=30,
-                rrr=RRR,
+                rrr=rrr,
                 range_pct=range_pct,
             )
         }
@@ -133,10 +128,10 @@ def _prepare_day(
                 orb,
                 candles,
                 breakout_minutes=breakout_minutes,
-                entry_cutoff=ENTRY_CUTOFF,
+                entry_cutoff=entry_cutoff,
                 entry_mode="retest",
                 retest_within_minutes=window,
-                rrr=RRR,
+                rrr=rrr,
                 range_pct=range_pct,
             )
         prepared.append(
@@ -153,7 +148,7 @@ def _prepare_day(
 
 def _month_result(setup: SheetSetup, packs: dict[date, list[_Prepared]], start: date, end: date) -> MonthResult:
     key = "direct" if setup.entry_mode == "direct" else str(setup.retest_within_minutes)
-    equity = CAPITAL
+    equity = setup.capital
     peak = equity
     max_drawdown = 0.0
     trades: list[dict] = []
@@ -170,6 +165,9 @@ def _month_result(setup: SheetSetup, packs: dict[date, list[_Prepared]], start: 
             if signal is None and key not in pack.signals:
                 continue
             if signal is not None:
+                if setup.max_price_enabled and signal["symbol"].endswith("-EQ"):
+                    if float(signal.get("entry") or 0) >= setup.max_stock_price:
+                        continue
                 signals.append(signal)
                 candles_by_symbol[pack.symbol] = pack.candle_map
                 minutes_by_symbol[pack.symbol] = pack.minutes
@@ -180,12 +178,17 @@ def _month_result(setup: SheetSetup, packs: dict[date, list[_Prepared]], start: 
             signals,
             candles_by_symbol,
             minutes_by_symbol,
-            sizing_capital=min(CAPITAL, equity),
-            margin_multiplier=MARGIN,
+            sizing_capital=min(setup.capital, equity),
+            margin_multiplier=setup.margin_multiplier,
             risk_pct=setup.risk_pct,
             day_risk_pct=setup.day_risk_pct,
             max_trades=setup.max_trades,
             breakout_minutes=setup.breakout_minutes,
+            trailing_enabled=setup.trailing_enabled,
+            trailing_trigger_pct=setup.trailing_trigger_pct,
+            trailing_add_pct=setup.trailing_add_pct,
+            brokerage_open=setup.brokerage_open,
+            brokerage_add=setup.brokerage_add,
         )
         equity += result["pnl"]
         peak = max(peak, equity)
@@ -194,7 +197,7 @@ def _month_result(setup: SheetSetup, packs: dict[date, list[_Prepared]], start: 
     scored = score_trades(trades)
     return MonthResult(
         month=start.month,
-        gross_pnl=equity - CAPITAL,
+        gross_pnl=equity - setup.capital,
         trades=len(trades),
         wins=scored["wins"],
         losses=scored["losses"],
@@ -208,23 +211,24 @@ def iter_sheet_results(
     windows: list[tuple[date, date]],
     progress=None,
 ):
-    """Yield (setup id, month results). Candle building is shared by rows with the same range and candle size."""
+    """Yield (setup id, month results). Candle building is shared when range, candle, cutoff, and RRR match."""
     groups: dict[tuple, list[SheetSetup]] = defaultdict(list)
     for setup in setups:
-        groups[(setup.universe, setup.orb_minutes, setup.breakout_minutes)].append(setup)
+        groups[(setup.universe, setup.orb_minutes, setup.breakout_minutes, setup.entry_cutoff, setup.rrr)].append(setup)
     indexed = {name: index_days(bars) for name, bars in bars_by_universe.items()}
     total = len(groups)
-    for index, ((universe, orb_minutes, breakout_minutes), group) in enumerate(groups.items(), start=1):
+    for index, ((universe, orb_minutes, breakout_minutes, entry_cutoff, rrr), group) in enumerate(groups.items(), start=1):
         if progress:
             progress(
-                f"Preparing {universe} · {orb_minutes}m range · {breakout_minutes}m candles ({index}/{total})"
+                f"Preparing {universe} · {orb_minutes}m range · {breakout_minutes}m candles · RRR {rrr} "
+                f"({index}/{total})"
             )
         days = indexed.get(universe, {})
         packs: dict[date, list[_Prepared]] = {}
         for start, end in windows:
             for day in trading_days(start, end):
                 if day in days:
-                    packs[day] = _prepare_day(days[day], day, orb_minutes, breakout_minutes)
+                    packs[day] = _prepare_day(days[day], day, orb_minutes, breakout_minutes, entry_cutoff, rrr)
         for setup in group:
             if progress:
                 progress(f"Scoring {setup.setup_id}")

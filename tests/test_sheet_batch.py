@@ -1,17 +1,61 @@
-"""Workbook upload fills Stage 1 results and leaves formula columns alone."""
+"""Workbook upload fills combination results and leaves formula columns alone."""
 from datetime import date
 from io import BytesIO
 
 from openpyxl import Workbook, load_workbook
 
 from src.backtest.sheet_batch import (
+    COMBINATIONS_SHEET,
     MonthResult,
     fill_workbook,
     read_setups,
     sheet_windows,
 )
 
-HEADERS = [
+COMBO_HEADERS = [
+    "ID",
+    "Entry",
+    "Second break within",
+    "Symbols",
+    "Opening range (from 09:15)",
+    "Breakout candle size",
+    "ORB range %",
+    "Range qualifies when",
+    "Risk per trade %",
+    "Risk per day %",
+    "Max trades per day",
+    "Reward : risk",
+    "Trailing stop loss",
+    "% of distance to target",
+    "Add size % of open qty",
+    "Capital",
+    "Margin",
+    "No entry after",
+    "Price filter",
+    "Brokerage open leg",
+    "Brokerage add leg",
+    "Jan P&L",
+    "Feb P&L",
+    "Mar P&L",
+    "Apr P&L",
+    "May P&L",
+    "Jun P&L",
+    "Jul P&L",
+    "Aug P&L",
+    "Sep P&L",
+    "Oct P&L",
+    "Nov P&L",
+    "Total Trades",
+    "Total Targets",
+    "Total Stops",
+    "Worst Max DD",
+    "Total P&L",
+    "Profitable months",
+    "Worst month",
+    "Win rate (T/(T+S))",
+]
+
+LEGACY_HEADERS = [
     "ID",
     "Entry",
     "Second break within",
@@ -45,24 +89,83 @@ HEADERS = [
 ]
 
 
-def _book() -> bytes:
+def _combo_book() -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = COMBINATIONS_SHEET
+    ws.append(COMBO_HEADERS)
+    ws.append(
+        [
+            "C-00001",
+            "Direct breakout",
+            "N/A",
+            "Equity watchlist",
+            "5 minutes",
+            "1 minute",
+            0.5,
+            "Greater than or equal",
+            1,
+            3,
+            2,
+            2,
+            "Off",
+            "N/A",
+            "N/A",
+            100_000,
+            "5x",
+            "11:59",
+            "Off",
+            50,
+            50,
+        ]
+    )
+    ws.append(
+        [
+            "C-00002",
+            "Retest",
+            "30 minutes of the first break",
+            "Indices",
+            "1 hour",
+            "5 minutes",
+            0.7,
+            "Less than or equal",
+            1.5,
+            3,
+            2,
+            2,
+            "On",
+            50,
+            50,
+            50_000,
+            "5x",
+            "11:59",
+            "Off",
+            50,
+            50,
+        ]
+    )
+    col_aa = COMBO_HEADERS.index("Total P&L") + 1
+    ws.cell(2, col_aa).value = '=IF(COUNT(V2:AF2)=0,"",SUM(V2:AF2))'
+    ws.cell(2, col_aa + 1).value = '=IF(COUNT(V2:AF2)=0,"",COUNTIF(V2:AF2,">0"))'
+    ws.cell(2, col_aa + 2).value = '=IF(COUNT(V2:AF2)=0,"",MIN(V2:AF2))'
+    ws.cell(2, col_aa + 3).value = '=IF(OR(AG2="",AH2=""),"",IF(AG2+AH2=0,"",AG2/(AG2+AH2)))'
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
+
+
+def _legacy_book() -> bytes:
     wb = Workbook()
     direct = wb.active
     direct.title = "Stage1_Direct"
     retest = wb.create_sheet("Stage1B_Retest")
-    risk = wb.create_sheet("Risk_Grid")
-    risk["A1"] = "Risk ID"
-    risk["A2"] = "R-01"
     for ws, row in (
         (direct, ["D-001", "Direct breakout", "N/A", "Equity watchlist", "5 minutes", "1 minute", 0.5, "Greater than or equal", 1, 3, 2]),
         (retest, ["R-001", "Retest", "15 minutes of the first break", "Indices", "1 hour", "5 minutes", 0.7, "Less than or equal", 1, 3, 2]),
     ):
-        ws.append(HEADERS)
+        ws.append(LEGACY_HEADERS)
         ws.append(row)
         ws["AA2"] = '=IF(COUNT(L2:V2)=0,"",SUM(L2:V2))'
-        ws["AB2"] = '=IF(COUNT(L2:V2)=0,"",COUNTIF(L2:V2,">0"))'
-        ws["AC2"] = '=IF(COUNT(L2:V2)=0,"",MIN(L2:V2))'
-        ws["AD2"] = '=IF(OR(X2="",Y2=""),"",IF(X2+Y2=0,"",X2/(X2+Y2)))'
     buffer = BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
@@ -90,13 +193,13 @@ def test_fast_sheet_matches_the_month_by_month_run():
 
     bars = {"NSE:AAA-EQ": _session(101.0, 400, next_low=100.5, next_high=110.0)}
     window = (DAY, DAY)
-    prepared = {DAY: _prepare_day(bars, DAY, 5, 5)}
+    prepared = {DAY: _prepare_day(bars, DAY, 5, 5, "11:59", 2.0)}
 
     def _check(entry_mode: str, window_minutes: int) -> None:
         setup = SheetSetup(
-            sheet="Stage1_Direct",
+            sheet=COMBINATIONS_SHEET,
             row=2,
-            setup_id="D-001",
+            setup_id="C-00001",
             entry_mode=entry_mode,
             retest_within_minutes=window_minutes,
             universe="watchlist",
@@ -122,44 +225,37 @@ def test_fast_sheet_matches_the_month_by_month_run():
     _check("retest", 30)
 
 
-def test_real_stage_file_parses_both_sheets():
+def test_orb_combinations_file_parses():
     from pathlib import Path
 
-    path = Path(__file__).resolve().parents[1] / "Backtest ReadMe.xlsx"
+    path = Path(__file__).resolve().parents[1] / "ORB_Combinations.xlsx"
     if not path.exists():
         return
     setups = read_setups(load_workbook(path))
-    assert len([item for item in setups if item.sheet == "Stage1_Direct"]) == 96
-    assert len([item for item in setups if item.sheet == "Stage1B_Retest"]) == 288
+    assert len(setups) == 11520
+    assert all(setup.sheet == COMBINATIONS_SHEET for setup in setups)
     assert {item.entry_mode for item in setups} == {"direct", "retest"}
 
 
-def test_fill_writes_stage_sheets_and_keeps_formulas():
-    filled, done, skipped = fill_workbook(_book(), _results, replace_filled=False)
+def test_fill_writes_combinations_sheet_and_keeps_formulas():
+    filled, done, skipped = fill_workbook(_combo_book(), _results, replace_filled=False)
     wb = load_workbook(BytesIO(filled))
-    direct = wb["Stage1_Direct"]
-    retest = wb["Stage1B_Retest"]
+    ws = wb[COMBINATIONS_SHEET]
     assert done == 2 and skipped == 0
-    assert direct["L2"].value == 10
-    assert direct["M2"].value == 20
-    assert direct["W2"].value == 4
-    assert direct["X2"].value == 2
-    assert direct["Y2"].value == 2
-    assert direct["Z2"].value == 80
-    assert direct["AA2"].value.startswith("=IF(COUNT")
-    assert direct["AD2"].value.startswith("=IF(OR")
-    assert retest["L2"].value == -4
-    assert retest["C2"].value == "15 minutes of the first break"
-    assert wb["Risk_Grid"]["A2"].value == "R-01"
+    jan_col = COMBO_HEADERS.index("Jan P&L") + 1
+    assert ws.cell(2, jan_col).value == 10
+    assert ws.cell(3, jan_col).value == -4
+    total_trades_col = COMBO_HEADERS.index("Total Trades") + 1
+    assert ws.cell(2, total_trades_col).value == 4
+    formula_col = COMBO_HEADERS.index("Total P&L") + 1
+    assert str(ws.cell(2, formula_col).value).startswith("=IF(COUNT")
     setups = read_setups(wb)
-    assert [item.setup_id for item in setups] == ["D-001", "R-001"]
+    assert setups[1].trailing_enabled is True
+    assert setups[1].capital == 50_000
+
+
+def test_legacy_stage_sheets_still_parse():
+    setups = read_setups(load_workbook(BytesIO(_legacy_book())))
+    assert len(setups) == 2
     assert setups[0].entry_mode == "direct"
     assert setups[1].universe == "indices"
-    assert setups[1].orb_minutes == 60
-    assert setups[1].retest_within_minutes == 15
-
-    again, done_again, skipped_again = fill_workbook(filled, _results)
-    assert done_again == 0 and skipped_again == 2
-    replaced, done_replaced, skipped_replaced = fill_workbook(filled, _results, replace_filled=True)
-    assert done_replaced == 2 and skipped_replaced == 0
-    assert load_workbook(BytesIO(replaced))["Stage1_Direct"]["AA2"].value.startswith("=")
