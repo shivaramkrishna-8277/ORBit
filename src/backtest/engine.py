@@ -30,6 +30,9 @@ class BacktestRequest:
     entry_mode: str = "direct"
     retest_within_minutes: int = 30
     include_months: tuple[tuple[int, int], ...] | None = None
+    trailing_enabled: bool = False
+    trailing_trigger_pct: float = 50.0
+    trailing_add_pct: float = 50.0
 
 
 def score_trades(trades: list[dict]) -> dict:
@@ -60,6 +63,11 @@ def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=No
         raise ValueError("Capital and RRR must be positive.")
     if request.max_trades_per_day < 1:
         raise ValueError("Max trades per day must be at least 1.")
+    if request.trailing_enabled:
+        if not 1 <= request.trailing_trigger_pct <= 99:
+            raise ValueError("Trail trigger must be between 1% and 99% of the distance to target.")
+        if not 1 <= request.trailing_add_pct <= 100:
+            raise ValueError("Trail add size must be between 1% and 100% of the open quantity.")
 
     days = trading_days(request.date_from, request.date_to)
     if request.include_months:
@@ -124,6 +132,9 @@ def run_backtest(client, request: BacktestRequest, progress=None, minute_bars=No
             entry_cutoff=request.entry_cutoff,
             entry_mode=request.entry_mode,
             retest_within_minutes=request.retest_within_minutes,
+            trailing_enabled=request.trailing_enabled,
+            trailing_trigger_pct=request.trailing_trigger_pct,
+            trailing_add_pct=request.trailing_add_pct,
         )
         equity_end = equity + result["pnl"]
         daily.append(

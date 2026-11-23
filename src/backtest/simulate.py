@@ -41,6 +41,21 @@ def _ticker(symbol: str) -> str:
     return text
 
 
+def _milestone_price(side: str, entry: float, target: float, trigger_pct: float) -> float:
+    """Price at trigger_pct of the way from entry to target."""
+    fraction = trigger_pct / 100.0
+    if side == "BULLISH":
+        return entry + fraction * (target - entry)
+    return entry - fraction * (entry - target)
+
+
+def _milestone_touched(side: str, entry: float, target: float, trigger_pct: float, bar: dict) -> bool:
+    level = _milestone_price(side, entry, target, trigger_pct)
+    if side == "BULLISH":
+        return float(bar["high"]) >= level
+    return float(bar["low"]) <= level
+
+
 def _exit_on_bar(side: str, stop: float, target: float, bar: dict) -> tuple[float, str] | None:
     """Stop is checked before target. A gap through the stop fills at the open."""
     open_ = float(bar["open"])
@@ -211,6 +226,9 @@ def simulate_day(
     entry_cutoff: str = "15:15",
     entry_mode: str = "direct",
     retest_within_minutes: int = 30,
+    trailing_enabled: bool = False,
+    trailing_trigger_pct: float = 50.0,
+    trailing_add_pct: float = 50.0,
 ) -> dict:
     """Simulate one session. Sizing capital is already capped by the caller."""
     day_dt = IST.localize(datetime(day.year, day.month, day.day, 9, 15))
@@ -254,6 +272,9 @@ def simulate_day(
         day_risk_pct=day_risk_pct,
         max_trades=max_trades,
         breakout_minutes=breakout_minutes,
+        trailing_enabled=trailing_enabled,
+        trailing_trigger_pct=trailing_trigger_pct,
+        trailing_add_pct=trailing_add_pct,
     )
 
 
@@ -270,6 +291,9 @@ def manage_day(
     day_risk_pct: float,
     max_trades: int,
     breakout_minutes: int,
+    trailing_enabled: bool = False,
+    trailing_trigger_pct: float = 50.0,
+    trailing_add_pct: float = 50.0,
 ) -> dict:
     """Turn ready signals into trades. Exits use the breakout candles, then the 15:15 close."""
     buying_power = sizing_capital * margin_multiplier
@@ -291,42 +315,111 @@ def manage_day(
         if pnl < 0:
             realized_loss += -pnl
         risk = pos["planned_risk"] or 1.0
-        trades.append(
-            {
-                "date": day.isoformat(),
-                "symbol": pos["symbol"],
-                "ticker": pos["ticker"],
-                "side": pos["side"],
-                "entry_time": pos["entry_time"].strftime("%H:%M"),
-                "entry": pos["entry"],
-                "stop": pos["stop"],
-                "stop_basis": pos["stop_basis"],
-                "target": pos["target"],
-                "exit_time": when.astimezone(IST).strftime("%H:%M"),
-                "exit": exit_px,
-                "exit_reason": reason,
-                "qty": pos["qty"],
-                "pnl": pnl,
-                "r_multiple": pnl / risk,
-                "orb_high": pos.get("orb_high"),
-                "orb_low": pos.get("orb_low"),
-            }
-        )
+        leg = pos.get("trade_leg", "open")
+        row = {
+            "date": day.isoformat(),
+            "symbol": pos["symbol"],
+            "ticker": pos["ticker"],
+            "side": pos["side"],
+            "entry_time": pos["entry_time"].strftime("%H:%M"),
+            "entry": pos["entry"],
+            "stop": pos["stop"],
+            "stop_basis": pos["stop_basis"],
+            "target": pos["target"],
+            "exit_time": when.astimezone(IST).strftime("%H:%M"),
+            "exit": exit_px,
+            "exit_reason": reason,
+            "qty": pos["qty"],
+            "pnl": pnl,
+            "r_multiple": pnl / risk,
+            "orb_high": pos.get("orb_high"),
+            "orb_low": pos.get("orb_low"),
+            "trade_leg": leg,
+        }
+        if leg == "add":
+            row["parent_key"] = pos.get("parent_key")
+        else:
+            row["trade_key"] = pos.get("trade_key")
+        if pos.get("scaled"):
+            row["trail_scaled"] = True
+        trades.append(row)
 
-    for stamp in times:
-        still_open: list[dict] = []
-        for pos in open_positions:
+    def _maybe_scale_in(pos: dict, bar: dict, stamp: datetime, used_margin: float) -> dict | None:
+        """At the milestone, move stop to entry and open the add leg. Returns the child or None."""
+        if not trailing_enabled or pos.get("scaled") or pos.get("trade_leg") == "add":
+            return None
+        if not _milestone_touched(pos["side"], pos["entry"], pos["target"], trailing_trigger_pct, bar):
+            return None
+        breakeven = float(pos["entry"])
+        trigger_px = _milestone_price(pos["side"], pos["entry"], pos["target"], trailing_trigger_pct)
+        add_qty = max(0, math.floor(pos["qty"] * (trailing_add_pct / 100.0)))
+        if add_qty < 1:
+            pos["scaled"] = True
+            pos["stop"] = breakeven
+            return None
+        room = buying_power - used_margin
+        by_margin = math.floor(room / trigger_px) if trigger_px > 0 else 0
+        add_qty = min(add_qty, by_margin)
+        if add_qty < 1:
+            pos["scaled"] = True
+            pos["stop"] = breakeven
+            return None
+        pos["scaled"] = True
+        pos["stop"] = breakeven
+        when = stamp + timedelta(minutes=breakout_minutes)
+        distance = abs(trigger_px - breakeven)
+        return {
+            "symbol": pos["symbol"],
+            "ticker": pos["ticker"],
+            "side": pos["side"],
+            "entry": trigger_px,
+            "stop": breakeven,
+            "target": pos["target"],
+            "stop_basis": pos["stop_basis"],
+            "orb_high": pos.get("orb_high"),
+            "orb_low": pos.get("orb_low"),
+            "candle_start": stamp,
+            "entry_time": when,
+            "qty": add_qty,
+            "planned_risk": add_qty * distance,
+            "trade_leg": "add",
+            "parent_key": pos.get("trade_key"),
+        }
+
+    def _process_exits(positions: list[dict]) -> list[dict]:
+        still: list[dict] = []
+        used_margin = sum(p["qty"] * p["entry"] for p in positions)
+        for pos in positions:
             bar = candles_by_symbol.get(pos["symbol"], {}).get(stamp)
             if bar is None or stamp <= pos["candle_start"]:
-                still_open.append(pos)
+                still.append(pos)
                 continue
             hit = _exit_on_bar(pos["side"], pos["stop"], pos["target"], bar)
-            if hit is None:
-                still_open.append(pos)
+            if hit is not None:
+                exit_px, reason = hit
+                _close(pos, exit_px, reason, stamp + timedelta(minutes=breakout_minutes))
                 continue
-            exit_px, reason = hit
-            _close(pos, exit_px, reason, stamp + timedelta(minutes=breakout_minutes))
-        open_positions = still_open
+            child = _maybe_scale_in(pos, bar, stamp, used_margin)
+            if child is not None:
+                used_margin += child["qty"] * child["entry"]
+                hit_parent = _exit_on_bar(pos["side"], pos["stop"], pos["target"], bar)
+                if hit_parent is not None:
+                    exit_px, reason = hit_parent
+                    _close(pos, exit_px, reason, stamp + timedelta(minutes=breakout_minutes))
+                else:
+                    still.append(pos)
+                hit_child = _exit_on_bar(child["side"], child["stop"], child["target"], bar)
+                if hit_child is not None:
+                    exit_px, reason = hit_child
+                    _close(child, exit_px, reason, stamp + timedelta(minutes=breakout_minutes))
+                else:
+                    still.append(child)
+                continue
+            still.append(pos)
+        return still
+
+    for stamp in times:
+        open_positions = _process_exits(open_positions)
 
         batch = rank_signals([sig for sig in signals if sig["candle_start"] == stamp])
         for sig in batch:
@@ -348,11 +441,15 @@ def manage_day(
             if realized_loss + open_risk + planned > day_risk_limit + 1e-6:
                 skipped.append({**_skip(sig, day), "reason": "day risk"})
                 continue
+            trade_key = f"{day.isoformat()}:{sig['symbol']}:{sig['entry_time'].strftime('%H:%M')}"
             open_positions.append(
                 {
                     **sig,
                     "qty": qty,
                     "planned_risk": planned,
+                    "trade_leg": "open",
+                    "trade_key": trade_key,
+                    "scaled": False,
                 }
             )
             taken += 1

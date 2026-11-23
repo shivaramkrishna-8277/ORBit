@@ -227,6 +227,50 @@ def test_target_exit():
     assert trade["exit"] == trade["entry"] + 2 * (trade["entry"] - trade["stop"])
 
 
+def test_trailing_hits_original_stop_before_milestone_on_the_same_bar():
+    """If the bar tags both the original stop and the trail trigger, the stop wins."""
+    result = _run(
+        {"NSE:AAA-EQ": _session(101.0, 400, next_low=98.0, next_high=110.0)},
+        trailing_enabled=True,
+        trailing_trigger_pct=50.0,
+        trailing_add_pct=50.0,
+    )
+    assert result["trades"] == 1
+    assert result["trade_rows"][0]["exit_reason"] == "stop"
+    assert all(row.get("trade_leg", "open") == "open" for row in result["trade_rows"])
+
+
+def test_trailing_scales_in_and_lists_open_plus_add_rows():
+    bars = _session(101.0, 400, next_low=102.0, next_high=103.0, next_open=102.0)
+    for bar in bars:
+        when = bar["datetime"]
+        if when.hour == 9 and 35 <= when.minute <= 39:
+            bar["open"] = 102.0
+            bar["low"] = max(float(bar["low"]), 101.5)
+            bar["close"] = 102.0
+    follow = _flat((9, 40), 5, 104.0, 80)
+    follow[0] = (9, 40, 104.0, 105.0, 103.5, 104.5, 80)
+    bars = bars + _minutes(follow)
+    result = _run(
+        {"NSE:AAA-EQ": bars},
+        trailing_enabled=True,
+        trailing_trigger_pct=50.0,
+        trailing_add_pct=50.0,
+        sizing_capital=100_000,
+        margin_multiplier=10,
+    )
+    assert result["trades"] == 2
+    legs = {row["trade_leg"] for row in result["trade_rows"]}
+    assert legs == {"open", "add"}
+    parent = next(row for row in result["trade_rows"] if row["trade_leg"] == "open")
+    child = next(row for row in result["trade_rows"] if row["trade_leg"] == "add")
+    assert child["parent_key"] == parent["trade_key"]
+    assert parent.get("trail_scaled") is True
+    assert parent["exit_reason"] == "target"
+    assert child["exit_reason"] == "target"
+    assert child["stop"] == parent["entry"]
+
+
 def test_retest_enters_on_the_second_break_not_the_first():
     orb = _flat((9, 15), 5, 100.0, 100)
     orb[-1] = (9, 19, 100.0, 100.4, 99.4, 100.0, 100)

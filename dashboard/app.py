@@ -828,6 +828,28 @@ with tab_backtest:
             disabled=not bt_price_on,
             key="bt_max_price",
         )
+        st.subheader("Trailing stop")
+        t1, t2, t3 = st.columns([1, 1, 1])
+        bt_trailing = t1.toggle("Trailing stop loss", value=False, key="bt_trailing")
+        bt_trail_trigger = t2.number_input(
+            "% of distance to target",
+            min_value=1.0,
+            max_value=99.0,
+            value=50.0,
+            step=1.0,
+            disabled=not bt_trailing,
+            help="When price reaches this % of the way from entry to target, stop moves to entry and the add is opened.",
+            key="bt_trail_trigger",
+        )
+        bt_trail_add = t3.number_input(
+            "Add size (% of open qty)",
+            min_value=1.0,
+            max_value=100.0,
+            value=50.0,
+            step=1.0,
+            disabled=not bt_trailing,
+            key="bt_trail_add",
+        )
         b1, b2 = st.columns(2)
         run_bt = b1.form_submit_button("Run selected months", type="primary")
         run_year = b2.form_submit_button("This year, fresh each month")
@@ -872,6 +894,9 @@ with tab_backtest:
                     max_trades_per_day=int(bt_max_trades),
                     rrr=float(bt_rrr),
                     include_months=months,
+                    trailing_enabled=bool(bt_trailing),
+                    trailing_trigger_pct=float(bt_trail_trigger),
+                    trailing_add_pct=float(bt_trail_add),
                 )
 
             if run_year:
@@ -1034,6 +1059,15 @@ with tab_backtest:
                     and row["side"] in picked_sides
                     and row["ticker"] in picked_symbols
                 ]
+
+                def _trade_display_order(row: dict) -> tuple:
+                    if row.get("trade_leg") == "add":
+                        parent = row.get("parent_key") or ""
+                        return (row["date"], parent, 1, row["entry_time"])
+                    key = row.get("trade_key") or f"{row['date']}:{row['symbol']}:{row['entry_time']}"
+                    return (row["date"], key, 0, row["entry_time"])
+
+                shown.sort(key=_trade_display_order)
                 st.caption(f"{len(shown)} of {len(rows)} trades")
 
                 @st.dialog("Trade chart", width="large")
@@ -1125,7 +1159,9 @@ with tab_backtest:
                     for trade in shown:
                         cols = st.columns([1.15, 0.9, 0.85, 0.7, 0.8, 0.8, 0.8, 0.7, 0.95, 0.7, 0.55, 0.45])
                         cols[0].write(trade["date"])
-                        cols[1].write(trade["ticker"])
+                        leg = trade.get("trade_leg", "open")
+                        symbol_cell = trade["ticker"] if leg == "open" else f"↳ {trade['ticker']}"
+                        cols[1].write(symbol_cell)
                         cols[2].write(trade["side"].title())
                         cols[3].write(trade["entry_time"])
                         cols[4].write(f"{trade['entry']:.2f}")
