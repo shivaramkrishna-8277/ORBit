@@ -9,6 +9,9 @@ from io import BytesIO
 from openpyxl import load_workbook
 
 from src.backtest.months import month_window
+from src.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 COMBINATIONS_SHEET = "Combinations"
 LEGACY_SHEETS = ("Stage1_Direct", "Stage1B_Retest")
@@ -283,20 +286,38 @@ def _result_sheets(workbook) -> tuple[str, ...]:
     return present
 
 
-def read_setups(workbook) -> list[SheetSetup]:
+def read_setups(workbook, progress=None) -> list[SheetSetup]:
     setups: list[SheetSetup] = []
+    header_cache: dict[tuple[str, bool], dict[str, int]] = {}
     for name in _result_sheets(workbook):
         ws = workbook[name]
         combinations = name == COMBINATIONS_SHEET
-        headers = _headers(ws, combinations=combinations)
-        for cells in ws.iter_rows(min_row=2, max_row=ws.max_row):
-            row_values = tuple(cell.value for cell in cells)
+        cache_key = (name, combinations)
+        if cache_key not in header_cache:
+            header_cache[cache_key] = _headers(ws, combinations=combinations)
+        headers = header_cache[cache_key]
+        last_row = int(ws.max_row or 1)
+        parsed = 0
+        for row_num, row_values in enumerate(
+            ws.iter_rows(min_row=2, max_row=last_row, values_only=True),
+            start=2,
+        ):
+            if not row_values or row_values[0] in (None, ""):
+                continue
             try:
-                setups.append(_parse_setup_row(name, cells[0].row, row_values, headers, combinations=combinations))
+                setups.append(_parse_setup_row(name, row_num, row_values, headers, combinations=combinations))
             except ValueError as exc:
                 if "blank id" in str(exc):
                     continue
                 raise
+            parsed += 1
+            if progress and parsed % 2000 == 0:
+                progress(f"Loaded {parsed} combination rows…")
+            if parsed % 2000 == 0:
+                logger.info("Parsed %d combination rows", parsed)
+    if progress:
+        progress(f"Loaded {len(setups)} combination rows.")
+    logger.info("Parsed %d combination rows total", len(setups))
     return setups
 
 
@@ -368,24 +389,38 @@ def write_results(ws, headers: dict[str, int], row: int, results: list[MonthResu
     ws.cell(row, headers["Worst Max DD"]).value = round(max((result.max_drawdown for result in results), default=0.0), 2)
 
 
-def needed_universes(workbook, replace_filled: bool) -> set[str]:
+def needed_universes(
+    workbook,
+    replace_filled: bool,
+    setups: list[SheetSetup] | None = None,
+) -> set[str]:
     """Symbol lists still required. A row with January filled is skipped unless replace is on."""
+    if setups is None:
+        setups = read_setups(workbook)
+    if replace_filled:
+        return {setup.universe for setup in setups}
+    header_cache: dict[tuple[str, bool], dict[str, int]] = {}
     needed: set[str] = set()
-    for setup in read_setups(workbook):
-        ws = workbook[setup.sheet]
+    for setup in setups:
         combinations = setup.sheet == COMBINATIONS_SHEET
-        if replace_filled or not _filled(ws, _headers(ws, combinations=combinations), setup.row):
+        cache_key = (setup.sheet, combinations)
+        if cache_key not in header_cache:
+            header_cache[cache_key] = _headers(workbook[setup.sheet], combinations=combinations)
+        if not _filled(workbook[setup.sheet], header_cache[cache_key], setup.row):
             needed.add(setup.universe)
     return needed
 
 
 def fill_workbook(
-    data: bytes,
+    data: bytes | None = None,
     run_one=None,
     progress=None,
     replace_filled: bool = False,
     checkpoint=None,
     run_many=None,
+    *,
+    workbook=None,
+    setups: list[SheetSetup] | None = None,
 ) -> tuple[bytes, int, int]:
     """
     Run every row on the Combinations sheet (or legacy Stage 1 sheets).
@@ -393,28 +428,52 @@ def fill_workbook(
     `run_one(setup)` returns one MonthResult per month that has started.
     Columns Total P&L, Profitable months, Worst month, and Win rate are formulas and stay blank.
     """
-    workbook = load_workbook(BytesIO(data))
+    if workbook is None:
+        if data is None:
+            raise ValueError("Either workbook bytes or an open workbook is required.")
+        if progress:
+            progress("Opening workbook…")
+        logger.info("Opening combination workbook")
+        workbook = load_workbook(BytesIO(data), keep_links=False)
     present = _result_sheets(workbook)
     if not present:
         raise ValueError(f"The file needs a {COMBINATIONS_SHEET} sheet or the legacy Stage 1 sheets.")
-    if progress:
-        progress("Reading combination rows from the workbook…")
-    setups = read_setups(workbook)
+    if setups is None:
+        if progress:
+            progress("Reading combination rows from the workbook…")
+        setups = read_setups(workbook, progress=progress)
     if not setups:
         raise ValueError("That sheet has no setups to run.")
     done = 0
     skipped = 0
-    pending = []
-    for index, setup in enumerate(setups, start=1):
-        ws = workbook[setup.sheet]
-        combinations = setup.sheet == COMBINATIONS_SHEET
-        headers = _headers(ws, combinations=combinations)
-        if not replace_filled and _filled(ws, headers, setup.row):
-            skipped += 1
-            if progress:
-                progress(f"Skipped {setup.setup_id} ({index}/{len(setups)}), January is already filled.")
-            continue
-        pending.append(setup)
+    header_cache: dict[tuple[str, bool], dict[str, int]] = {}
+    pending: list[SheetSetup] = []
+    if replace_filled:
+        pending = list(setups)
+        if progress:
+            progress(f"Replace is on · {len(pending)} rows queued.")
+    else:
+        if progress:
+            progress("Checking which rows still need January–November results…")
+        for index, setup in enumerate(setups, start=1):
+            combinations = setup.sheet == COMBINATIONS_SHEET
+            cache_key = (setup.sheet, combinations)
+            if cache_key not in header_cache:
+                header_cache[cache_key] = _headers(workbook[setup.sheet], combinations=combinations)
+            if _filled(workbook[setup.sheet], header_cache[cache_key], setup.row):
+                skipped += 1
+            else:
+                pending.append(setup)
+            if progress and index % 2000 == 0:
+                progress(f"Checked {index}/{len(setups)} rows · {len(pending)} to run · {skipped} skipped")
+            if index % 2000 == 0:
+                logger.info(
+                    "Checked %d/%d rows · %d to run · %d skipped",
+                    index,
+                    len(setups),
+                    len(pending),
+                    skipped,
+                )
 
     if progress:
         progress(f"Queued {len(pending)} setups to run · skipped {skipped} already filled.")
@@ -426,7 +485,11 @@ def fill_workbook(
     def _write(setup: SheetSetup, results) -> None:
         nonlocal done
         ws = workbook[setup.sheet]
-        write_results(ws, _headers(ws, combinations=setup.sheet == COMBINATIONS_SHEET), setup.row, list(results))
+        combinations = setup.sheet == COMBINATIONS_SHEET
+        cache_key = (setup.sheet, combinations)
+        if cache_key not in header_cache:
+            header_cache[cache_key] = _headers(ws, combinations=combinations)
+        write_results(ws, header_cache[cache_key], setup.row, list(results))
         done += 1
         if checkpoint and (done % 10 == 0 or done == len(pending)):
             snapshot = BytesIO()
