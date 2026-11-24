@@ -93,8 +93,9 @@ def run_sheet_batch_command(command_id: int) -> str:
     symbols_equity = list(settings.symbols)
     symbols_indices = list(settings.index_symbols or [])
 
-    def _note(message: str) -> None:
-        _progress_payload(command_id, meta, message)
+    def _note(message: str, *, done: int | None = None, skipped: int | None = None) -> None:
+        nonlocal meta
+        meta = _progress_payload(command_id, meta, message, done=done, skipped=skipped)
 
     _note("Starting combination sheet on the server…")
     token = get_access_token(allow_oauth=False)
@@ -125,13 +126,9 @@ def run_sheet_batch_command(command_id: int) -> str:
     done = 0
     skipped = 0
 
-    def _checkpoint(payload: bytes) -> None:
+    def _checkpoint(payload: bytes, *, written: int = 0) -> None:
         output_path.write_bytes(payload)
-        _note(
-            f"Checkpoint saved ({done} rows written).",
-            done=done,
-            skipped=skipped,
-        )
+        _note(f"Checkpoint saved ({written} rows written).", done=written)
 
     payload, done, skipped = fill_workbook(
         progress=_note,

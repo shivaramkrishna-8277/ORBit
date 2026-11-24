@@ -494,7 +494,7 @@ def fill_workbook(
         if checkpoint and (done % 10 == 0 or done == len(pending)):
             snapshot = BytesIO()
             workbook.save(snapshot)
-            checkpoint(snapshot.getvalue())
+            checkpoint(snapshot.getvalue(), written=done)
 
     if run_many is not None:
         by_id = {setup.setup_id: setup for setup in pending}

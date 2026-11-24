@@ -401,12 +401,17 @@ class SessionManager:
 
                 detail = run_sheet_batch_command(command_id)
                 self._finish_dashboard_command(command_id, "done", detail)
+                if not self._dry_run:
+                    self._notifier.send_sheet_batch_result(command_id, True, detail)
                 logger.info("Combination sheet job finished: %s", detail)
             else:
                 self._finish_dashboard_command(command_id, "error", f"Unknown action: {action}")
         except Exception as exc:
             logger.exception("Dashboard command %s failed", action)
-            self._finish_dashboard_command(command_id, "error", str(exc))
+            detail = str(exc)
+            self._finish_dashboard_command(command_id, "error", detail)
+            if action == "sheet_batch" and not self._dry_run:
+                self._notifier.send_sheet_batch_result(command_id, False, detail)
 
     def _run_dashboard_fyers_auth(self, command_id: int) -> None:
         """Send a fresh Fyers login link on Telegram (up to ~10 min wait)."""

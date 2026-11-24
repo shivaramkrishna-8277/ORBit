@@ -179,6 +179,19 @@ class TelegramNotifier:
         )
         self.send_message(msg)
 
+    def send_sheet_batch_result(self, job_id: int, success: bool, detail: str) -> None:
+        """Notify when a dashboard combination-sheet background job finishes."""
+        now = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
+        body = detail.strip()
+        if len(body) > 900:
+            body = body[:897] + "…"
+        if success:
+            title = "✅ Combination sheet job finished"
+        else:
+            title = "❌ Combination sheet job failed"
+        msg = f"{title}\nJob #{job_id}\n{body}\n{now}"
+        self.send_message(msg)
+
     def send_test_message(self) -> None:
         now = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
         self.send_message(f"✅ ORB Bot — test message OK\n{now}")

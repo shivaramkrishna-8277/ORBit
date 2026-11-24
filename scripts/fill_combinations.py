@@ -80,7 +80,7 @@ def main() -> None:
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    def _checkpoint(payload: bytes) -> None:
+    def _checkpoint(payload: bytes, *, written: int = 0) -> None:
         out_path.write_bytes(payload)
         _progress(f"Checkpoint saved -> {out_path}")
 
