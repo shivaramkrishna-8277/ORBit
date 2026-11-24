@@ -114,3 +114,61 @@ NIFTY50_SYMBOLS: list[str] = [
 ]
 
 assert len(NIFTY50_SYMBOLS) == 50, f"Expected 50 symbols, got {len(NIFTY50_SYMBOLS)}"
+
+# ── Nifty Next 50 Symbols ─────────────────────────────────────────────────────
+# Verify against NSE: ind_niftynext50list.csv
+# https://www.nseindia.com/products-services/indices-niftynext50-index
+NIFTYNEXT50_SYMBOLS: list[str] = [
+    "NSE:ABB-EQ",
+    "NSE:ADANIENSOL-EQ",
+    "NSE:ADANIGREEN-EQ",
+    "NSE:ADANIPOWER-EQ",
+    "NSE:AMBUJACEM-EQ",
+    "NSE:BAJAJHLDNG-EQ",
+    "NSE:BANKBARODA-EQ",
+    "NSE:BOSCHLTD-EQ",
+    "NSE:BPCL-EQ",
+    "NSE:BRITANNIA-EQ",
+    "NSE:CANBK-EQ",
+    "NSE:CGPOWER-EQ",
+    "NSE:CHOLAFIN-EQ",
+    "NSE:CUMMINSIND-EQ",
+    "NSE:DIVISLAB-EQ",
+    "NSE:DLF-EQ",
+    "NSE:DMART-EQ",
+    "NSE:ENRIN-EQ",
+    "NSE:GAIL-EQ",
+    "NSE:GODREJCP-EQ",
+    "NSE:HAL-EQ",
+    "NSE:HDFCAMC-EQ",
+    "NSE:HINDZINC-EQ",
+    "NSE:HYUNDAI-EQ",
+    "NSE:IDEA-EQ",
+    "NSE:IOC-EQ",
+    "NSE:IRFC-EQ",
+    "NSE:JINDALSTEL-EQ",
+    "NSE:LTM-EQ",
+    "NSE:MAZDOCK-EQ",
+    "NSE:MOTHERSON-EQ",
+    "NSE:MUTHOOTFIN-EQ",
+    "NSE:PFC-EQ",
+    "NSE:PIDILITIND-EQ",
+    "NSE:PNB-EQ",
+    "NSE:POLYCAB-EQ",
+    "NSE:POWERINDIA-EQ",
+    "NSE:SIEMENS-EQ",
+    "NSE:SOLARINDS-EQ",
+    "NSE:TATACAP-EQ",
+    "NSE:TATAPOWER-EQ",
+    "NSE:TMCV-EQ",
+    "NSE:TORNTPHARM-EQ",
+    "NSE:TVSMOTOR-EQ",
+    "NSE:UNIONBANK-EQ",
+    "NSE:VAML-EQ",
+    "NSE:VBL-EQ",
+    "NSE:VEDL-EQ",
+    "NSE:WIPRO-EQ",
+    "NSE:ZYDUSLIFE-EQ",
+]
+
+assert len(NIFTYNEXT50_SYMBOLS) == 50, f"Expected 50 symbols, got {len(NIFTYNEXT50_SYMBOLS)}"

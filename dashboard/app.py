@@ -14,7 +14,7 @@ import streamlit.components.v1 as components
 from src.backtest.months import MONTH_NAMES, month_window
 from src.broker.auth import is_token_valid
 from src.broker.symbol_search import load_master, resolve_nse_equity, search_nse_equity
-from src.config import NIFTY50_SYMBOLS
+from src.config import NIFTY50_SYMBOLS, NIFTYNEXT50_SYMBOLS
 from src.strategy.runtime_settings import (
     BREAKOUT_TIMEFRAMES,
     ORB_DURATIONS,
@@ -118,6 +118,23 @@ def _add_symbols_bulk(symbols: list[str]) -> int:
 
 def _persist_watchlist() -> None:
     update_watchlist(list(st.session_state.symbols))
+
+
+def _remove_symbols_bulk(symbols: list[str]) -> int:
+    drop = set(symbols)
+    before = len(st.session_state.symbols)
+    st.session_state.symbols = [s for s in st.session_state.symbols if s not in drop]
+    return before - len(st.session_state.symbols)
+
+
+def _apply_index_preset(symbols: list[str], *, add: bool) -> int:
+    if add:
+        changed = _add_symbols_bulk(symbols)
+    else:
+        changed = _remove_symbols_bulk(symbols)
+    if changed:
+        _persist_watchlist()
+    return changed
 
 
 def _focus_ticker_search() -> None:
@@ -226,7 +243,7 @@ def _symbol_add_panel() -> None:
             if errors:
                 st.warning("Skipped: " + "; ".join(errors[:4]))
 
-    b1, b2, b3 = st.columns(3)
+    b1, b2, b3, b4 = st.columns(4)
     with b1:
         if st.button(
             "Add to watchlist",
@@ -246,6 +263,12 @@ def _symbol_add_panel() -> None:
                     st.session_state.modal_staging.append(sym)
             st.rerun()
     with b3:
+        if st.button("Queue Nifty Next 50", key="queue_niftynext"):
+            for sym in NIFTYNEXT50_SYMBOLS:
+                if sym not in st.session_state.modal_staging and sym not in st.session_state.symbols:
+                    st.session_state.modal_staging.append(sym)
+            st.rerun()
+    with b4:
         if st.button("Cancel", key="cancel_add"):
             st.session_state.modal_staging = []
             st.session_state.add_symbols_open = False
@@ -322,6 +345,25 @@ with tab_list:
         if st.button("Reload watchlist from disk", use_container_width=True):
             _load_symbols(load_settings())
             st.rerun()
+
+    s1, s2, s3, s4 = st.columns(4)
+    with s1:
+        if st.button("Add Nifty 50", use_container_width=True, key="shortcut_add_n50"):
+            _apply_index_preset(NIFTY50_SYMBOLS, add=True)
+            st.rerun()
+    with s2:
+        if st.button("Remove Nifty 50", use_container_width=True, key="shortcut_rm_n50"):
+            _apply_index_preset(NIFTY50_SYMBOLS, add=False)
+            st.rerun()
+    with s3:
+        if st.button("Add Nifty Next 50", use_container_width=True, key="shortcut_add_nn50"):
+            _apply_index_preset(NIFTYNEXT50_SYMBOLS, add=True)
+            st.rerun()
+    with s4:
+        if st.button("Remove Nifty Next 50", use_container_width=True, key="shortcut_rm_nn50"):
+            _apply_index_preset(NIFTYNEXT50_SYMBOLS, add=False)
+            st.rerun()
+    st.caption("Index presets save immediately (no need to open the add panel).")
 
     if st.session_state.add_symbols_open:
         with st.container(border=True):
